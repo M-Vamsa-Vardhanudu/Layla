@@ -82,6 +82,14 @@ function getDefaultProfile() {
   };
 }
 
+function normalizeInventoryBucket(bucket) {
+  if (!bucket) return {};
+  if (bucket instanceof Map) return Object.fromEntries(bucket.entries());
+  if (typeof bucket.toObject === "function") return bucket.toObject();
+  if (typeof bucket === "object") return { ...bucket };
+  return {};
+}
+
 function hydrateProfile(profile) {
   const defaults = getDefaultProfile();
 
@@ -97,9 +105,9 @@ function hydrateProfile(profile) {
   profile.lastActivityAt ??= defaults.lastActivityAt;
 
   profile.inventory ??= defaults.inventory;
-  profile.inventory.fiveStar ??= {};
-  profile.inventory.fourStar ??= {};
-  profile.inventory.threeStar ??= {};
+  profile.inventory.fiveStar = normalizeInventoryBucket(profile.inventory.fiveStar);
+  profile.inventory.fourStar = normalizeInventoryBucket(profile.inventory.fourStar);
+  profile.inventory.threeStar = normalizeInventoryBucket(profile.inventory.threeStar);
 
   return profile;
 }
