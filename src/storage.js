@@ -1,28 +1,65 @@
-const fs = require("node:fs");
-const path = require("node:path");
+const mongoose = require("mongoose");
 
-const DATA_DIR = path.join(__dirname, "..", "data");
-const DATA_FILE = path.join(DATA_DIR, "users.json");
+const MONGODB_URI = process.env.MONGODB_URI;
 
-function ensureStorage() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+const userProfileSchema = new mongoose.Schema(
+  {
+    _id: String,
+    primogems: { type: Number, default: 160 },
+    level: { type: Number, default: 1 },
+    exp: { type: Number, default: 0 },
+    guaranteedFeatured5: { type: Boolean, default: false },
+    pity5: { type: Number, default: 0 },
+    pity4: { type: Number, default: 0 },
+    wishes: { type: Number, default: 0 },
+    inventory: {
+      fiveStar: { type: Map, of: Number, default: {} },
+      fourStar: { type: Map, of: Number, default: {} },
+      threeStar: { type: Map, of: Number, default: {} }
+    },
+    activeTrivia: { type: Object, default: null },
+    lastTriviaAt: { type: Number, default: 0 },
+    lastActivityAt: { type: Number, default: 0 }
+  },
+  { collection: "users", timestamps: true }
+);
+
+const UserProfile = mongoose.model("UserProfile", userProfileSchema);
+
+async function connectDatabase() {
+  if (!MONGODB_URI) {
+    throw new Error("MONGODB_URI environment variable is not set");
   }
 
-  if (!fs.existsSync(DATA_FILE)) {
-    fs.writeFileSync(DATA_FILE, JSON.stringify({}, null, 2), "utf8");
+  if (mongoose.connection.readyState === 0) {
+    await mongoose.connect(MONGODB_URI);
+    console.log("Connected to MongoDB");
   }
 }
 
-function loadUsers() {
-  ensureStorage();
-  const raw = fs.readFileSync(DATA_FILE, "utf8");
-  return JSON.parse(raw);
+async function loadUsers() {
+  await connectDatabase();
+  const users = await UserProfile.find();
+  const usersMap = {};
+
+  users.forEach((doc) => {
+    usersMap[doc._id] = doc.toObject();
+    delete usersMap[doc._id].__v;
+  });
+
+  return usersMap;
 }
 
-function saveUsers(users) {
-  ensureStorage();
-  fs.writeFileSync(DATA_FILE, JSON.stringify(users, null, 2), "utf8");
+async function saveUsers(users) {
+  await connectDatabase();
+
+  for (const [userId, profile] of Object.entries(users)) {
+    await UserProfile.updateOne(
+      { _id: userId },
+      { $set: profile },
+      { upsert: true }
+    );
+  }
 }
 
 function getDefaultProfile() {
@@ -67,15 +104,50 @@ function hydrateProfile(profile) {
   return profile;
 }
 
-function getProfile(users, userId) {
+async function getProfile(users, userId) {
   if (!users[userId]) {
-    users[userId] = getDefaultProfile();
+    users[userId] = {
+      ...getDefaultProfile(),
+      _id: userId
+    };
   }
   return hydrateProfile(users[userId]);
+}
+
+async function loadUserProfile(userId) {
+  await connectDatabase();
+  const doc = await UserProfile.findById(userId);
+
+  if (!doc) {
+    const newProfile = {
+      _id: userId,
+      ...getDefaultProfile()
+    };
+    await UserProfile.create(newProfile);
+    return newProfile;
+  }
+
+  return hydrateProfile(doc.toObject());
+}
+
+async function saveUserProfile(userId, profile) {
+  await connectDatabase();
+  const profileData = {
+    ...profile,
+    _id: userId
+  };
+  delete profileData.__v;
+  delete profileData.createdAt;
+  delete profileData.updatedAt;
+
+  await UserProfile.updateOne({ _id: userId }, { $set: profileData }, { upsert: true });
 }
 
 module.exports = {
   loadUsers,
   saveUsers,
-  getProfile
+  getProfile,
+  loadUserProfile,
+  saveUserProfile,
+  connectDatabase
 };

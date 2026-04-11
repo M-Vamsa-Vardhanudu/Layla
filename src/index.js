@@ -15,7 +15,7 @@ const {
 } = require("discord.js");
 const { getTodayBanner, CHARACTERS, CHARACTER_ELEMENTS } = require("./data/banners");
 const { getRandomTrivia } = require("./data/trivia");
-const { loadUsers, saveUsers, getProfile } = require("./storage");
+const { loadUsers, saveUsers, getProfile, loadUserProfile, saveUserProfile, connectDatabase } = require("./storage");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const PREFIX = process.env.PREFIX || "!";
@@ -465,8 +465,8 @@ client.once("clientReady", () => {
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
-  const users = loadUsers();
-  const profile = getProfile(users, message.author.id);
+  const users = await loadUsers();
+  const profile = await getProfile(users, message.author.id);
   const isCommand = message.content.startsWith(PREFIX);
 
   if (!isCommand) {
@@ -481,7 +481,7 @@ client.on("messageCreate", async (message) => {
       profile.primogems += ACTIVITY_REWARD_PRIMOS;
       const levelsGained = gainExp(profile, ACTIVITY_REWARD_EXP);
       awardLevelUpPrimos(profile, levelsGained);
-      saveUsers(users);
+      await saveUserProfile(message.author.id, profile);
     }
 
     return;
@@ -723,7 +723,7 @@ client.on("messageCreate", async (message) => {
     const levelsGained = gainExp(profile, amount * 12);
     const levelUpPrimos = awardLevelUpPrimos(profile, levelsGained);
 
-    saveUsers(users);
+    await saveUserProfile(message.author.id, profile);
 
     const highestResult =
       results.find((r) => r.rarity === "5-star") ||
@@ -799,7 +799,7 @@ client.on("messageCreate", async (message) => {
     const trivia = getRandomTrivia();
     profile.activeTrivia = trivia;
     profile.lastTriviaAt = now;
-    saveUsers(users);
+    await saveUserProfile(message.author.id, profile);
 
     const embed = new EmbedBuilder()
       .setTitle(`${EMOJI.shenheTea} Trivia Time: ${message.author.username}`)
@@ -837,7 +837,7 @@ client.on("messageCreate", async (message) => {
       const levelsGained = gainExp(profile, 20);
       const levelUpPrimos = awardLevelUpPrimos(profile, levelsGained);
       profile.activeTrivia = null;
-      saveUsers(users);
+      await saveUserProfile(message.author.id, profile);
 
       const levelLine = levelsGained > 0
         ? ` ${EMOJI.shenheTea} Level up by ${levelsGained} to level ${profile.level}. ${EMOJI.primogem} Level-up bonus: +${levelUpPrimos} primogems.`
@@ -848,11 +848,12 @@ client.on("messageCreate", async (message) => {
     }
 
     profile.activeTrivia = null;
-    saveUsers(users);
+    await saveUserProfile(message.author.id, profile);
     await message.reply(`${EMOJI.laylaSad} Not quite. No primogems this round. Try another trivia.`);
     return;
   }
 });
 
 startHealthServer();
+connectDatabase().catch(err => console.error("MongoDB connection failed:", err));
 client.login(TOKEN);
