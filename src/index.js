@@ -1,6 +1,7 @@
 require("dotenv").config();
 const fs = require("node:fs");
 const path = require("node:path");
+const http = require("node:http");
 const sharp = require("sharp");
 
 const {
@@ -27,6 +28,7 @@ const ACTIVITY_MIN_MESSAGE_LEN = 8;
 const LEVEL_UP_REWARD_PRIMOS = Number.parseInt(process.env.LEVEL_UP_REWARD_PRIMOS || "25", 10);
 const GENSHIN_API_BASE = "https://genshin.jmp.blue";
 const WISH_ANIMATION_WAIT_MS = Number.parseInt(process.env.WISH_ANIMATION_WAIT_MS || "7000", 10);
+const PORT = Number.parseInt(process.env.PORT || "0", 10);
 const ROOT_DIR = path.resolve(__dirname, "..");
 const WISH_GIF_FILES = {
   "3-star": process.env.THREE_STAR_WISH_GIF_FILE || "threestar.gif",
@@ -172,6 +174,25 @@ function wishGifFilePath(rarity) {
 function wait(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, Math.max(0, ms));
+  });
+}
+
+function startHealthServer() {
+  if (!PORT) return;
+
+  const server = http.createServer((req, res) => {
+    if (req.url === "/" || req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Not Found" }));
+  });
+
+  server.listen(PORT, () => {
+    console.log(`Health server listening on port ${PORT}`);
   });
 }
 
@@ -833,4 +854,5 @@ client.on("messageCreate", async (message) => {
   }
 });
 
+startHealthServer();
 client.login(TOKEN);
