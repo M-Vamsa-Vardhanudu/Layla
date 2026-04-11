@@ -1,0 +1,22 @@
+{
+  "name": "genshin-wish-bot",
+  "version": "1.0.0",
+  "description": "Discord bot with Genshin-style wishing and trivia primogem rewards",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": [
+    "discord",
+    "genshin",
+    "bot"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.17.3",
+    "dotenv": "^16.5.0",
+    "sharp": "^0.33.5"
+  }
+}
