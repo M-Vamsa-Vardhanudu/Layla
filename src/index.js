@@ -11,7 +11,10 @@ const {
   EmbedBuilder,
   AttachmentBuilder,
   ActionRowBuilder,
-  StringSelectMenuBuilder
+  StringSelectMenuBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ComponentType
 } = require("discord.js");
 const { getTodayBanner, CHARACTERS, CHARACTER_ELEMENTS } = require("./data/banners");
 const { getRandomTrivia } = require("./data/trivia");
@@ -457,6 +460,50 @@ function buildWishResultEmbed(username, count, results, profile, bannerName, lev
   return embed;
 }
 
+function buildWishHighlightEmbeds(results) {
+  return results
+    .filter((result) => result.rarity !== "3-star")
+    .slice(0, 10)
+    .map((result, index) => {
+      const color = result.rarity === "5-star" ? 0xf39c12 : 0x3498db;
+      const elementKey = CHARACTER_ELEMENTS[result.item] || "";
+      const elementEmoji = elementEmojiForKey(elementKey);
+      const elementText = elementKey ? `${elementEmoji} ${titleCase(elementKey)}` : "Unknown Element";
+      return new EmbedBuilder()
+        .setTitle(`Highlight ${index + 1}: ${result.item}`)
+        .setDescription(`${result.rarity}${result.featured ? " (featured)" : ""}\n${elementText}`)
+        .setColor(color)
+        .setImage(characterCardUrl(result.item));
+    });
+}
+
+function buildWishSlideEmbed(username, bannerName, results, index) {
+  const result = results[index];
+  const elementKey = CHARACTER_ELEMENTS[result.item] || "";
+  const elementEmoji = elementEmojiForKey(elementKey);
+  const elementText = elementKey ? `${elementEmoji} ${titleCase(elementKey)}` : "N/A";
+  const color = result.rarity === "5-star" ? 0xf39c12 : result.rarity === "4-star" ? 0x3498db : 0x95a5a6;
+
+  const embed = new EmbedBuilder()
+    .setTitle(`${EMOJI.shenheGroove} ${username}'s 10-Pull Reveal`)
+    .setDescription(
+      [
+        `Pull **${index + 1}/${results.length}**`,
+        `Result: **${result.item}**`,
+        `Rarity: **${result.rarity}**${result.featured ? " (featured)" : ""}`,
+        `Element: ${elementText}`
+      ].join("\n")
+    )
+    .setColor(color)
+    .setFooter({ text: `${bannerName} • Use Reveal to continue or Skip to jump to highlights` });
+
+  if (result.rarity !== "3-star") {
+    embed.setImage(characterCardUrl(result.item));
+  }
+
+  return embed;
+}
+
 client.once("clientReady", () => {
   console.log(`Logged in as ${client.user.tag}`);
   console.log(`Pools loaded -> 5-star: ${ACTIVE_POOLS.fiveStarStandard.length}, 4-star: ${ACTIVE_POOLS.fourStarPool.length}`);
@@ -764,26 +811,100 @@ client.on("messageCreate", async (message) => {
     await message.channel.send({ embeds: [animationEmbed], files: attachmentFiles });
     await wait(WISH_ANIMATION_WAIT_MS);
 
-    const highlightEmbeds = results
-      .filter((result) => result.rarity !== "3-star")
-      .slice(0, 10)
-      .map((result, index) => {
-        const color = result.rarity === "5-star" ? 0xf39c12 : 0x3498db;
-        const elementKey = CHARACTER_ELEMENTS[result.item] || "";
-        const elementEmoji = elementEmojiForKey(elementKey);
-        const elementText = elementKey ? `${elementEmoji} ${titleCase(elementKey)}` : "Unknown Element";
-        return new EmbedBuilder()
-          .setTitle(`Highlight ${index + 1}: ${result.item}`)
-          .setDescription(`${result.rarity}${result.featured ? " (featured)" : ""}\n${elementText}`)
-          .setColor(color)
-          .setImage(characterCardUrl(result.item));
-      });
+    const highlightEmbeds = buildWishHighlightEmbeds(results);
 
-    if (highlightEmbeds.length > 0) {
-      await message.channel.send({ embeds: highlightEmbeds });
+    if (amount !== 10) {
+      if (highlightEmbeds.length > 0) {
+        await message.channel.send({ embeds: highlightEmbeds });
+      }
+
+      await message.reply({ embeds: [resultEmbed] });
+      return;
     }
 
-    await message.reply({ embeds: [resultEmbed] });
+    let revealIndex = 0;
+    const revealIdPrefix = `wish_reveal_${message.id}`;
+
+    const buildRevealRows = (completed) => [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`${revealIdPrefix}_next`)
+          .setLabel("⬅ Reveal")
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(completed),
+        new ButtonBuilder()
+          .setCustomId(`${revealIdPrefix}_skip`)
+          .setLabel("Skip")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(completed)
+      )
+    ];
+
+    const revealMessage = await message.channel.send({
+      embeds: [buildWishSlideEmbed(message.author.username, banner.name, results, revealIndex)],
+      components: buildRevealRows(false)
+    });
+
+    let finalized = false;
+    const finishReveal = async () => {
+      if (finalized) return;
+      finalized = true;
+
+      try {
+        await revealMessage.edit({ components: buildRevealRows(true) });
+      } catch {
+        // Ignore edit errors if message was removed.
+      }
+
+      if (highlightEmbeds.length > 0) {
+        await message.channel.send({ embeds: highlightEmbeds });
+      }
+
+      await message.reply({ embeds: [resultEmbed] });
+    };
+
+    const revealCollector = revealMessage.createMessageComponentCollector({
+      componentType: ComponentType.Button,
+      time: 5 * 60 * 1000
+    });
+
+    revealCollector.on("collect", async (interaction) => {
+      if (!interaction.customId.startsWith(revealIdPrefix)) return;
+
+      if (interaction.user.id !== message.author.id) {
+        await interaction.reply({
+          content: `${EMOJI.laylaHesitant} This reveal belongs to ${message.author.username}.`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      if (interaction.customId.endsWith("_skip")) {
+        await interaction.update({
+          embeds: [buildWishSlideEmbed(message.author.username, banner.name, results, revealIndex)],
+          components: buildRevealRows(true)
+        });
+        revealCollector.stop("skipped");
+        return;
+      }
+
+      revealIndex = Math.min(revealIndex + 1, results.length - 1);
+      const completed = revealIndex >= results.length - 1;
+
+      await interaction.update({
+        embeds: [buildWishSlideEmbed(message.author.username, banner.name, results, revealIndex)],
+        components: buildRevealRows(completed)
+      });
+
+      if (completed) {
+        revealCollector.stop("completed");
+      }
+    });
+
+    revealCollector.on("end", async () => {
+      await finishReveal();
+    });
+
     return;
   }
 
