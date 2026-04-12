@@ -17,14 +17,14 @@ const {
   ComponentType
 } = require("discord.js");
 const { getTodayBanner, CHARACTERS, CHARACTER_ELEMENTS } = require("./data/banners");
-const { getRandomTrivia } = require("./data/trivia");
+const { TRIVIA_QUESTIONS, getRandomTrivia } = require("./data/trivia");
 const { startElementalClashSession } = require("./data/elementalClash");
 const { loadUsers, saveUsers, getProfile, loadUserProfile, saveUserProfile, connectDatabase } = require("./storage");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const PREFIX = process.env.PREFIX || "!";
 const WISH_COST = 160;
-const TRIVIA_COOLDOWN_MS = 60 * 1000;
+const TRIVIA_COOLDOWN_MS = 15 * 1000;
 const ACTIVITY_COOLDOWN_MS = 2 * 60 * 1000;
 const ACTIVITY_REWARD_PRIMOS = 8;
 const ACTIVITY_REWARD_EXP = 4;
@@ -157,6 +157,99 @@ const pendingTrades = new Map();
 
 function normalize(text) {
   return text.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normalizeAnswer(text) {
+  return normalize(String(text || ""))
+    .replace(/[^a-z0-9\s]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function levenshteinDistance(a, b) {
+  const left = String(a || "");
+  const right = String(b || "");
+
+  if (left === right) return 0;
+  if (!left.length) return right.length;
+  if (!right.length) return left.length;
+
+  const prev = Array.from({ length: right.length + 1 }, (_, index) => index);
+  const curr = new Array(right.length + 1).fill(0);
+
+  for (let i = 1; i <= left.length; i += 1) {
+    curr[0] = i;
+
+    for (let j = 1; j <= right.length; j += 1) {
+      const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+      curr[j] = Math.min(
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + cost
+      );
+    }
+
+    for (let j = 0; j <= right.length; j += 1) {
+      prev[j] = curr[j];
+    }
+  }
+
+  return prev[right.length];
+}
+
+function isTriviaAnswerCorrect(userInput, answers) {
+  const normalizedInput = normalizeAnswer(userInput);
+  if (!normalizedInput) return false;
+
+  const normalizedAnswers = (answers || []).map((answer) => normalizeAnswer(answer)).filter(Boolean);
+  if (!normalizedAnswers.length) return false;
+
+  if (normalizedAnswers.includes(normalizedInput)) {
+    return true;
+  }
+
+  return normalizedAnswers.some((candidate) => {
+    const distance = levenshteinDistance(normalizedInput, candidate);
+    const maxLength = Math.max(normalizedInput.length, candidate.length);
+    const threshold = maxLength <= 6 ? 1 : 2;
+    return distance <= threshold;
+  });
+}
+
+function buildTriviaOptions(trivia, optionCount = 4) {
+  const correctAnswer = (trivia.answers && trivia.answers[0]) || "Unknown";
+  const correctNormalized = new Set((trivia.answers || []).map((answer) => normalizeAnswer(answer)).filter(Boolean));
+  const distractorPool = TRIVIA_QUESTIONS
+    .flatMap((question) => (question.answers && question.answers[0] ? [question.answers[0]] : []))
+    .filter((candidate) => !correctNormalized.has(normalizeAnswer(candidate)));
+
+  const used = new Set([normalizeAnswer(correctAnswer)]);
+  const options = [
+    {
+      label: titleCase(correctAnswer),
+      value: "correct"
+    }
+  ];
+
+  while (options.length < optionCount && distractorPool.length > 0) {
+    const index = Math.floor(Math.random() * distractorPool.length);
+    const [candidate] = distractorPool.splice(index, 1);
+    const normalizedCandidate = normalizeAnswer(candidate);
+    if (!normalizedCandidate || used.has(normalizedCandidate)) continue;
+
+    used.add(normalizedCandidate);
+    options.push({
+      label: titleCase(candidate),
+      value: `wrong_${options.length}`
+    });
+  }
+
+  for (let i = options.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [options[i], options[j]] = [options[j], options[i]];
+  }
+
+  return options;
 }
 
 function toCharacterSlug(name) {
@@ -776,8 +869,8 @@ client.on("messageCreate", async (message) => {
         `${EMOJI.shenheSmile} Genshin Wish Bot Commands`,
         `${PREFIX}banner - show active banner`,
         `${PREFIX}wish [1|10] - spend primogems to wish`,
-        `${PREFIX}trivia - get a trivia question for primogems`,
-        `${PREFIX}answer <text> - answer active trivia`,
+        `${PREFIX}trivia - get a dropdown trivia question for primogems`,
+        `${PREFIX}answer <text> - optional text fallback for active trivia`,
         `${PREFIX}clash - start an Elemental Clash raid with other players`,
         `${PREFIX}coinflip <heads|tails> <bet> - gamble primogems for a 50/50 payout`,
         `${PREFIX}trade @user - open a dropdown trade UI (both users lock in, then both press confirm)`,
@@ -1917,6 +2010,11 @@ client.on("messageCreate", async (message) => {
   if (cmd === "trivia") {
     const now = Date.now();
 
+    if (profile.activeTrivia) {
+      await message.reply(`${EMOJI.laylaHesitant} You already have an active trivia. Use the dropdown (or ${PREFIX}answer) first.`);
+      return;
+    }
+
     if (now - profile.lastTriviaAt < TRIVIA_COOLDOWN_MS) {
       const remaining = Math.ceil((TRIVIA_COOLDOWN_MS - (now - profile.lastTriviaAt)) / 1000);
       await message.reply(`${EMOJI.laylaHesitant} You can request another trivia in ${remaining}s.`);
@@ -1924,23 +2022,141 @@ client.on("messageCreate", async (message) => {
     }
 
     const trivia = getRandomTrivia();
-    profile.activeTrivia = trivia;
+    const options = buildTriviaOptions(trivia);
+    const triviaSessionId = `trivia_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+
+    profile.activeTrivia = {
+      sessionId: triviaSessionId,
+      question: trivia.question,
+      answers: trivia.answers,
+      reward: trivia.reward,
+      options
+    };
     profile.lastTriviaAt = now;
     await saveUserProfile(message.author.id, profile);
+
+    const triviaSelect = new StringSelectMenuBuilder()
+      .setCustomId(`trivia_select_${message.author.id}_${triviaSessionId}`)
+      .setPlaceholder("Choose your answer")
+      .setMinValues(1)
+      .setMaxValues(1)
+      .addOptions(options.map((option) => ({
+        label: option.label.slice(0, 100),
+        value: option.value
+      })));
+
+    const triviaRow = new ActionRowBuilder().addComponents(triviaSelect);
 
     const embed = new EmbedBuilder()
       .setTitle(`${EMOJI.shenheTea} Trivia Time: ${message.author.username}`)
       .setDescription(
         [
-          trivia.question,
+          profile.activeTrivia.question,
           "",
-          `Answer with: ${PREFIX}answer <your answer>`
+          `Pick from the dropdown below.`,
+          `Text fallback: ${PREFIX}answer <your answer>`
         ].join("\n")
       )
       .setColor(0x2ecc71)
       .setThumbnail(`${GENSHIN_API_BASE}/characters/traveler-anemo/icon`);
 
-    await message.reply({ embeds: [embed] });
+    const triviaMessage = await message.reply({ embeds: [embed], components: [triviaRow] });
+
+    const collector = triviaMessage.createMessageComponentCollector({
+      componentType: ComponentType.StringSelect,
+      time: 30 * 1000
+    });
+
+    collector.on("collect", async (interaction) => {
+      if (interaction.customId !== `trivia_select_${message.author.id}_${triviaSessionId}`) {
+        return;
+      }
+
+      if (interaction.user.id !== message.author.id) {
+        await interaction.reply({
+          content: `${EMOJI.laylaHesitant} This trivia belongs to ${message.author.username}.`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      if (!profile.activeTrivia || profile.activeTrivia.sessionId !== triviaSessionId) {
+        await interaction.reply({
+          content: `${EMOJI.laylaHesitant} This trivia session is no longer active.`,
+          ephemeral: true
+        });
+        collector.stop("resolved");
+        return;
+      }
+
+      const chosenValue = interaction.values[0];
+      const correct = chosenValue === "correct";
+
+      if (correct) {
+        profile.primogems += profile.activeTrivia.reward;
+        const reward = profile.activeTrivia.reward;
+        const levelsGained = gainExp(profile, 20);
+        const levelUpPrimos = awardLevelUpPrimos(profile, levelsGained);
+        profile.activeTrivia = null;
+        await saveUserProfile(message.author.id, profile);
+
+        const levelLine = levelsGained > 0
+          ? ` ${EMOJI.shenheTea} Level up by ${levelsGained} to level ${profile.level}. ${EMOJI.primogem} Level-up bonus: +${levelUpPrimos} primogems.`
+          : "";
+
+        await interaction.update({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle(`${EMOJI.shenheSmile} Correct!`)
+              .setDescription(
+                `You earned ${reward} primogems. ${EMOJI.primogem} Current primogems: ${profile.primogems}.${levelLine}`
+              )
+              .setColor(0x2ecc71)
+          ],
+          components: []
+        });
+
+        collector.stop("resolved");
+        return;
+      }
+
+      profile.activeTrivia = null;
+      await saveUserProfile(message.author.id, profile);
+      await interaction.update({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle(`${EMOJI.laylaSad} Not quite`)
+            .setDescription("No primogems this round. Try another trivia.")
+            .setColor(0xe74c3c)
+        ],
+        components: []
+      });
+
+      collector.stop("resolved");
+    });
+
+    collector.on("end", async (reason) => {
+      if (reason === "resolved") return;
+      if (!profile.activeTrivia || profile.activeTrivia.sessionId !== triviaSessionId) return;
+
+      profile.activeTrivia = null;
+      await saveUserProfile(message.author.id, profile);
+
+      try {
+        await triviaMessage.edit({
+          embeds: [
+            new EmbedBuilder()
+              .setTitle(`${EMOJI.laylaHesitant} Trivia Expired`)
+              .setDescription("Time is up. Use the trivia command again.")
+              .setColor(0xf39c12)
+          ],
+          components: []
+        });
+      } catch {
+        // Ignore edit failures when the message is deleted.
+      }
+    });
+
     return;
   }
 
@@ -1956,7 +2172,7 @@ client.on("messageCreate", async (message) => {
       return;
     }
 
-    const correct = profile.activeTrivia.answers.includes(userAnswer);
+    const correct = isTriviaAnswerCorrect(userAnswer, profile.activeTrivia.answers);
 
     if (correct) {
       profile.primogems += profile.activeTrivia.reward;

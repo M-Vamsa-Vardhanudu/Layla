@@ -126,7 +126,7 @@ const TRIVIA_QUESTIONS = [
   },
   {
     question: "What is resin used for?",
-    answers: ["claiming rewards"],
+    answers: ["claiming rewards", "artifacts", "domains", "boss rewards", "ley line rewards"],
     reward: 50
   },
   {
@@ -156,7 +156,7 @@ const TRIVIA_QUESTIONS = [
   },
   {
     question: "What is the reaction between Dendro and Electro?",
-    answers: ["quicken"],
+    answers: ["quicken", "spread", "aggravate"],
     reward: 55
   },
   {
