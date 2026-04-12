@@ -67,6 +67,7 @@ npm start
 - `!answer <text>`
 - `!clash`
 - `!coinflip <heads|tails> <bet>`
+- `!trade @user`
 - `!trade @user give <amount> <type> [item name] receive <amount> <type> [item name]`
 - `!profile`
 

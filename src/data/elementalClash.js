@@ -5,6 +5,7 @@ const {
   EmbedBuilder,
   AttachmentBuilder,
   ActionRowBuilder,
+  StringSelectMenuBuilder,
   ButtonBuilder,
   ButtonStyle,
   ComponentType
@@ -15,6 +16,7 @@ const MIN_PLAYERS = 2;
 const MAX_PLAYERS = 4;
 const LOBBY_TIMEOUT_MS = 45 * 1000;
 const ROUND_COUNT = 5;
+const TURN_ACTION_TIMEOUT_MS = 25 * 1000;
 const BOSS_ART_FILE = path.resolve(__dirname, "..", "..", "311882f16264d6498dcf1ae277b9e031_3641850878197328239.webp");
 
 const activeClashByChannel = new Map();
@@ -112,6 +114,30 @@ function getLeadCharacter(profile, characterElements) {
     element,
     power: (chosen.rarity === "fiveStar" ? 122 : 100) + Math.min(24, (copies - 1) * 4)
   };
+}
+
+function getCharacterByName(profile, characterElements, characterName) {
+  const entries = getOwnedCharacterEntries(profile);
+  const picked = entries.find((entry) => normalize(entry.name) === normalize(characterName));
+  if (!picked) return null;
+
+  return {
+    name: picked.name,
+    rarity: picked.rarity,
+    copies: picked.count,
+    element: characterElements[picked.name] || "ANEMO",
+    power: (picked.rarity === "fiveStar" ? 122 : 100) + Math.min(24, (picked.count - 1) * 4)
+  };
+}
+
+function buildCharacterSelectOptions(profile, limit = 25) {
+  return getOwnedCharacterEntries(profile)
+    .slice(0, limit)
+    .map((entry) => ({
+      label: entry.name,
+      value: entry.name,
+      description: `x${entry.count} • ${entry.rarity === "fiveStar" ? "5-star" : "4-star"}`
+    }));
 }
 
 function getElementLabel(element) {
@@ -321,8 +347,11 @@ async function renderBossCardBuffer(session) {
     .toBuffer();
 }
 
-function createPlayerState(user, profile, characterElements) {
-  const lead = getLeadCharacter(profile, characterElements);
+function createPlayerState(user, profile, characterElements, preferredCharacterName = null) {
+  const selected = preferredCharacterName
+    ? getCharacterByName(profile, characterElements, preferredCharacterName)
+    : null;
+  const lead = selected || getLeadCharacter(profile, characterElements);
   if (!lead) return null;
 
   const resolve = 260 + (profile.level * 10) + (lead.rarity === "fiveStar" ? 40 : 10);
@@ -348,7 +377,7 @@ function buildLobbyEmbed(session, emoji) {
     .setTitle(`${emoji?.shenheGroove || "Elemental Clash"} Elemental Clash Lobby`)
     .setDescription(
       [
-        "Join the raid, then the boss will spawn with random resistances and weaknesses.",
+        "Join the raid, choose your character from your dropdown, then start.",
         "",
         `Players: **${session.players.length}/${MAX_PLAYERS}**`,
         `Need at least **${MIN_PLAYERS}** players to start.`,
@@ -504,30 +533,56 @@ async function startElementalClashSession({
   session.players.push(initiator);
   activeClashByChannel.set(message.channel.id, session);
 
-  const buildRows = (locked = false) => [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`${session.customIdPrefix}_join`)
-        .setLabel("Join")
-        .setStyle(ButtonStyle.Success)
-        .setDisabled(locked),
-      new ButtonBuilder()
-        .setCustomId(`${session.customIdPrefix}_leave`)
-        .setLabel("Leave")
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(locked),
-      new ButtonBuilder()
-        .setCustomId(`${session.customIdPrefix}_start`)
-        .setLabel("Start")
-        .setStyle(ButtonStyle.Primary)
-        .setDisabled(locked || message.author.id !== session.initiatorId || session.players.length < MIN_PLAYERS),
-      new ButtonBuilder()
-        .setCustomId(`${session.customIdPrefix}_cancel`)
-        .setLabel("Cancel")
-        .setStyle(ButtonStyle.Danger)
-        .setDisabled(locked || message.author.id !== session.initiatorId)
-    )
-  ];
+  const buildRows = (locked = false) => {
+    const rows = [
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`${session.customIdPrefix}_join`)
+          .setLabel("Join")
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(locked),
+        new ButtonBuilder()
+          .setCustomId(`${session.customIdPrefix}_leave`)
+          .setLabel("Leave")
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(locked),
+        new ButtonBuilder()
+          .setCustomId(`${session.customIdPrefix}_start`)
+          .setLabel("Start")
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(locked || message.author.id !== session.initiatorId || session.players.length < MIN_PLAYERS),
+        new ButtonBuilder()
+          .setCustomId(`${session.customIdPrefix}_cancel`)
+          .setLabel("Cancel")
+          .setStyle(ButtonStyle.Danger)
+          .setDisabled(locked || message.author.id !== session.initiatorId)
+      )
+    ];
+
+    for (const player of session.players) {
+      const options = buildCharacterSelectOptions(player.profile);
+      if (!options.length) {
+        continue;
+      }
+
+      rows.push(
+        new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId(`${session.customIdPrefix}_pick_${player.userId}`)
+            .setPlaceholder(`${player.displayName} choose character`)
+            .setMinValues(1)
+            .setMaxValues(1)
+            .setDisabled(locked)
+            .addOptions(options.map((option) => ({
+              ...option,
+              default: normalize(player.character.name) === normalize(option.value)
+            })))
+        )
+      );
+    }
+
+    return rows;
+  };
 
   const lobbyMessage = await message.reply({
     embeds: [buildLobbyEmbed(session, emoji)],
@@ -576,7 +631,7 @@ async function startElementalClashSession({
       await lobbyMessage.edit({
         embeds: [new EmbedBuilder()
           .setTitle(`${emoji.shenheGroove} Elemental Clash`)
-          .setDescription(`The boss has appeared. Prepare for battle.`)
+          .setDescription(`The boss has appeared. Each player now chooses actions with buttons.`)
           .setColor(0x8b1e1e)
           .setImage("attachment://boss-preview.webp")],
         components: []
@@ -599,7 +654,94 @@ async function startElementalClashSession({
           continue;
         }
 
-        const move = chooseMoveType(player);
+        const turnPrefix = `${session.customIdPrefix}_turn_${round}_${player.userId}`;
+        const actionRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`${turnPrefix}_attack`).setLabel("Attack").setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(`${turnPrefix}_skill`).setLabel("Skill").setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`${turnPrefix}_burst`).setLabel("Burst").setStyle(ButtonStyle.Danger).setDisabled(player.burstCharge <= 0),
+          new ButtonBuilder().setCustomId(`${turnPrefix}_guard`).setLabel("Defend").setStyle(ButtonStyle.Secondary)
+        );
+
+        const turnPrompt = new EmbedBuilder()
+          .setTitle(`${emoji.shenheTea} ${player.displayName}'s Turn`)
+          .setDescription(
+            [
+              `Character: **${player.character.name}** (${getElementLabel(player.element)})`,
+              `Resolve: **${Math.round(player.resolve)} / ${player.maxResolve}**`,
+              `Burst Charges: **${player.burstCharge}**`,
+              `Boss HP: **${Math.max(0, session.bossHp)} / ${session.boss.maxHp}**`,
+              `Boss Resistance: **${getElementLabel(session.boss.resistance)}**`,
+              `Boss Weaknesses: **${session.boss.weakElements.map(getElementLabel).join(", ")}**`,
+              `Field Aura: **${getElementLabel(fieldAura)}**`,
+              "",
+              `You have ${Math.floor(TURN_ACTION_TIMEOUT_MS / 1000)}s to choose. Default is Attack.`
+            ].join("\n")
+          )
+          .setColor(0x5865f2);
+
+        await battleMessage.edit({ embeds: [turnPrompt], components: [actionRow] });
+
+        let selectedMoveType = "attack";
+        const turnCollector = battleMessage.createMessageComponentCollector({
+          componentType: ComponentType.Button,
+          time: TURN_ACTION_TIMEOUT_MS
+        });
+
+        await new Promise((resolveTurn) => {
+          turnCollector.on("collect", async (interaction) => {
+            if (!interaction.customId.startsWith(turnPrefix)) {
+              return;
+            }
+
+            if (interaction.user.id !== player.userId) {
+              await interaction.reply({
+                content: `${emoji.laylaHesitant} It is currently ${player.displayName}'s turn.`,
+                ephemeral: true
+              });
+              return;
+            }
+
+            const moveType = interaction.customId.split("_").pop();
+            if (!["attack", "skill", "burst", "guard"].includes(moveType)) {
+              await interaction.reply({
+                content: `${emoji.laylaHesitant} Invalid action.`,
+                ephemeral: true
+              });
+              return;
+            }
+
+            if (moveType === "burst" && player.burstCharge <= 0) {
+              await interaction.reply({
+                content: `${emoji.laylaHesitant} You have no burst charges right now.`,
+                ephemeral: true
+              });
+              return;
+            }
+
+            selectedMoveType = moveType;
+            await interaction.deferUpdate();
+            turnCollector.stop("selected");
+          });
+
+          turnCollector.on("end", () => {
+            resolveTurn();
+          });
+        });
+
+        await battleMessage.edit({ components: [] });
+
+        const moveBase = {
+          attack: 118,
+          skill: 160,
+          burst: 222,
+          guard: 0
+        };
+
+        const move = {
+          type: selectedMoveType,
+          baseDamage: moveBase[selectedMoveType] ?? 118
+        };
+
         if (move.type === "burst") {
           player.burstCharge = Math.max(0, player.burstCharge - 1);
         }
@@ -746,7 +888,6 @@ ${rewardLine}`;
   }, LOBBY_TIMEOUT_MS);
 
   const collector = lobbyMessage.createMessageComponentCollector({
-    componentType: ComponentType.Button,
     time: LOBBY_TIMEOUT_MS
   });
 
@@ -759,6 +900,32 @@ ${rewardLine}`;
     const currentProfileUsers = await loadUsers();
     const currentProfile = await getProfile(currentProfileUsers, interaction.user.id);
     const existingIndex = session.players.findIndex((player) => player.userId === interaction.user.id);
+
+    if (action.startsWith("pick_")) {
+      const ownerId = action.replace("pick_", "");
+      if (interaction.user.id !== ownerId) {
+        await interaction.reply({ content: `${emoji.laylaHesitant} This character picker is not for you.`, ephemeral: true });
+        return;
+      }
+
+      const playerIndex = session.players.findIndex((player) => player.userId === ownerId);
+      if (playerIndex < 0) {
+        await interaction.reply({ content: `${emoji.laylaHesitant} Join the raid first, then pick a character.`, ephemeral: true });
+        return;
+      }
+
+      const selectedName = interaction.values?.[0];
+      const updatedState = createPlayerState(interaction.user, currentProfile, characterElements, selectedName);
+      if (!updatedState) {
+        await interaction.reply({ content: `${emoji.laylaHesitant} Could not use that character for this battle.`, ephemeral: true });
+        return;
+      }
+
+      session.players[playerIndex] = updatedState;
+      await interaction.deferUpdate();
+      await refreshLobby();
+      return;
+    }
 
     if (action === "join") {
       if (existingIndex >= 0) {

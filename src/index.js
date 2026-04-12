@@ -581,6 +581,49 @@ function hasActiveTradeForUser(userId) {
   return false;
 }
 
+function getTradableCharacterChoices(profile, limit = 25) {
+  const entries = [
+    ...Object.entries(profile.inventory.fiveStar).map(([name, count]) => ({ rarity: "fiveStar", name, count })),
+    ...Object.entries(profile.inventory.fourStar).map(([name, count]) => ({ rarity: "fourStar", name, count }))
+  ]
+    .filter((entry) => entry.count > 0)
+    .sort((left, right) => {
+      const rarityRank = (value) => (value === "fiveStar" ? 2 : 1);
+      return rarityRank(right.rarity) - rarityRank(left.rarity) || right.count - left.count || left.name.localeCompare(right.name);
+    })
+    .slice(0, limit);
+
+  return entries.map((entry) => ({
+    label: entry.name,
+    value: `${entry.rarity}::${entry.name}`,
+    description: `x${entry.count} • ${TRADE_RARITY_LABELS[entry.rarity]}`,
+    rarity: entry.rarity,
+    name: entry.name,
+    count: entry.count
+  }));
+}
+
+function resolveCharacterTradeSelection(profile, selection) {
+  if (!selection?.rarity || !selection?.name) {
+    return { ok: false, reason: "selection was missing" };
+  }
+
+  const bucket = profile.inventory[selection.rarity];
+  const entry = findInventoryEntry(bucket, selection.name);
+
+  if (!entry || entry.count <= 0) {
+    return { ok: false, reason: `does not own ${selection.name}` };
+  }
+
+  return {
+    ok: true,
+    resolved: {
+      rarity: selection.rarity,
+      name: entry.name
+    }
+  };
+}
+
 function buildWishResultEmbed(username, count, results, profile, bannerName, levelsGained, levelUpPrimos) {
   const summary = {
     five: results.filter((r) => r.rarity === "5-star").length,
@@ -737,7 +780,8 @@ client.on("messageCreate", async (message) => {
         `${PREFIX}answer <text> - answer active trivia`,
         `${PREFIX}clash - start an Elemental Clash raid with other players`,
         `${PREFIX}coinflip <heads|tails> <bet> - gamble primogems for a 50/50 payout`,
-        `${PREFIX}trade @user give <amount> <type> [item name] receive <amount> <type> [item name] - start a trade that both users must approve`,
+        `${PREFIX}trade @user - open a dropdown trade UI (both users lock in to confirm)`,
+        `${PREFIX}trade @user give <amount> <type> [item name] receive <amount> <type> [item name] - advanced text trade`,
         `${PREFIX}characters - show your owned character roster`,
         `${PREFIX}profile - show your primogems, pity, and inventory`,
         `Passive rewards: chat messages (>=${ACTIVITY_MIN_MESSAGE_LEN} chars) earn ${ACTIVITY_REWARD_PRIMOS} primogems every ${Math.floor(ACTIVITY_COOLDOWN_MS / 60000)} min`
@@ -899,9 +943,377 @@ client.on("messageCreate", async (message) => {
       .split(/\s+/)
       .slice(2);
 
+    if (restTokens.length === 0) {
+      const targetProfile = await getProfile(users, targetUser.id);
+      const initiatorChoices = getTradableCharacterChoices(profile);
+      const targetChoices = getTradableCharacterChoices(targetProfile);
+
+      if (!initiatorChoices.length) {
+        await message.reply(`${EMOJI.laylaHesitant} You do not have any tradable 4-star/5-star characters yet.`);
+        return;
+      }
+
+      if (!targetChoices.length) {
+        await message.reply(`${EMOJI.laylaHesitant} ${targetUser.username} does not have any tradable 4-star/5-star characters yet.`);
+        return;
+      }
+
+      const tradeId = `trade_${message.id}`;
+      const trade = {
+        id: tradeId,
+        initiatorId: message.author.id,
+        targetId: targetUser.id,
+        stage: "selecting",
+        timeoutId: null,
+        selection: {
+          initiator: null,
+          target: null
+        },
+        locked: {
+          initiator: false,
+          target: false
+        }
+      };
+
+      const parseSelection = (value) => {
+        const [rarity, ...nameParts] = String(value || "").split("::");
+        const name = nameParts.join("::");
+        if (!rarity || !name) return null;
+        return { rarity, name };
+      };
+
+      const formatSelection = (selection) => {
+        if (!selection) return "Not selected";
+        return `${selection.name} (${TRADE_RARITY_LABELS[selection.rarity] || selection.rarity})`;
+      };
+
+      const buildCharacterTradeEmbed = (stage = "selecting") => {
+        return new EmbedBuilder()
+          .setTitle(`${EMOJI.shenheGroove} Character Trade Setup`)
+          .setColor(stage === "completed" ? 0x2ecc71 : stage === "cancelled" ? 0xe74c3c : 0x3498db)
+          .setDescription(
+            [
+              `**${message.author.username} gives:** ${formatSelection(trade.selection.initiator)}`,
+              `**${targetUser.username} gives:** ${formatSelection(trade.selection.target)}`,
+              "",
+              `Lock status: ${message.author.username} ${trade.locked.initiator ? "✅" : "❌"} | ${targetUser.username} ${trade.locked.target ? "✅" : "❌"}`,
+              "",
+              stage === "completed"
+                ? `${EMOJI.shenheSmile} Trade completed.`
+                : stage === "cancelled"
+                  ? `${EMOJI.laylaSad} Trade cancelled.`
+                  : `${EMOJI.laylaConfident} Pick one character each, then both users lock in.`
+            ].join("\n")
+          )
+          .setFooter({ text: "Changing selection automatically unlocks your side." });
+      };
+
+      const buildCharacterTradeRows = (disabled = false) => {
+        const initiatorSelect = new StringSelectMenuBuilder()
+          .setCustomId(`${tradeId}_pick_initiator`)
+          .setPlaceholder(trade.selection.initiator ? `Selected: ${trade.selection.initiator.name}` : `${message.author.username} picks a character`)
+          .setMinValues(1)
+          .setMaxValues(1)
+          .setDisabled(disabled || trade.locked.initiator)
+          .addOptions(initiatorChoices.map((option) => ({
+            label: option.label,
+            value: option.value,
+            description: option.description,
+            default: trade.selection.initiator
+              ? trade.selection.initiator.rarity === option.rarity && trade.selection.initiator.name === option.name
+              : false
+          })));
+
+        const targetSelect = new StringSelectMenuBuilder()
+          .setCustomId(`${tradeId}_pick_target`)
+          .setPlaceholder(trade.selection.target ? `Selected: ${trade.selection.target.name}` : `${targetUser.username} picks a character`)
+          .setMinValues(1)
+          .setMaxValues(1)
+          .setDisabled(disabled || trade.locked.target)
+          .addOptions(targetChoices.map((option) => ({
+            label: option.label,
+            value: option.value,
+            description: option.description,
+            default: trade.selection.target
+              ? trade.selection.target.rarity === option.rarity && trade.selection.target.name === option.name
+              : false
+          })));
+
+        return [
+          new ActionRowBuilder().addComponents(initiatorSelect),
+          new ActionRowBuilder().addComponents(targetSelect),
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`${tradeId}_lock_initiator`)
+              .setLabel(trade.locked.initiator ? `${message.author.username} Locked` : `${message.author.username} Lock In`)
+              .setStyle(trade.locked.initiator ? ButtonStyle.Success : ButtonStyle.Primary)
+              .setDisabled(disabled),
+            new ButtonBuilder()
+              .setCustomId(`${tradeId}_lock_target`)
+              .setLabel(trade.locked.target ? `${targetUser.username} Locked` : `${targetUser.username} Lock In`)
+              .setStyle(trade.locked.target ? ButtonStyle.Success : ButtonStyle.Primary)
+              .setDisabled(disabled),
+            new ButtonBuilder()
+              .setCustomId(`${tradeId}_cancel`)
+              .setLabel("Cancel")
+              .setStyle(ButtonStyle.Danger)
+              .setDisabled(disabled)
+          )
+        ];
+      };
+
+      const tradeMessage = await message.reply({
+        embeds: [buildCharacterTradeEmbed()],
+        components: buildCharacterTradeRows(false)
+      });
+
+      pendingTrades.set(tradeId, trade);
+
+      const cancelCharacterTrade = async (reason = "cancelled") => {
+        if (!pendingTrades.has(tradeId)) return;
+        pendingTrades.delete(tradeId);
+
+        if (trade.timeoutId) {
+          clearTimeout(trade.timeoutId);
+        }
+
+        trade.stage = "cancelled";
+
+        try {
+          await tradeMessage.edit({
+            embeds: [buildCharacterTradeEmbed("cancelled")],
+            components: []
+          });
+        } catch {
+          // Ignore edit errors when the message no longer exists.
+        }
+
+        if (reason === "expired") {
+          await message.channel.send(`${EMOJI.laylaHesitant} Trade expired before both users locked in.`);
+        }
+      };
+
+      const finalizeCharacterTrade = async () => {
+        try {
+          const freshUsers = await loadUsers();
+          const initiatorProfile = await getProfile(freshUsers, message.author.id);
+          const freshTargetProfile = await getProfile(freshUsers, targetUser.id);
+          const initiatorSelection = resolveCharacterTradeSelection(initiatorProfile, trade.selection.initiator);
+          const targetSelection = resolveCharacterTradeSelection(freshTargetProfile, trade.selection.target);
+
+          if (!initiatorSelection.ok || !targetSelection.ok) {
+            const reason = !initiatorSelection.ok ? initiatorSelection.reason : targetSelection.reason;
+            await message.channel.send(`${EMOJI.laylaHesitant} Trade failed: ${reason}.`);
+            await cancelCharacterTrade("invalid-state");
+            return;
+          }
+
+          const initiatorFromBucket = initiatorProfile.inventory[initiatorSelection.resolved.rarity];
+          const targetFromBucket = freshTargetProfile.inventory[targetSelection.resolved.rarity];
+          const initiatorToBucket = initiatorProfile.inventory[targetSelection.resolved.rarity];
+          const targetToBucket = freshTargetProfile.inventory[initiatorSelection.resolved.rarity];
+
+          initiatorFromBucket[initiatorSelection.resolved.name] -= 1;
+          if (initiatorFromBucket[initiatorSelection.resolved.name] <= 0) {
+            delete initiatorFromBucket[initiatorSelection.resolved.name];
+          }
+
+          targetFromBucket[targetSelection.resolved.name] -= 1;
+          if (targetFromBucket[targetSelection.resolved.name] <= 0) {
+            delete targetFromBucket[targetSelection.resolved.name];
+          }
+
+          initiatorToBucket[targetSelection.resolved.name] = (initiatorToBucket[targetSelection.resolved.name] || 0) + 1;
+          targetToBucket[initiatorSelection.resolved.name] = (targetToBucket[initiatorSelection.resolved.name] || 0) + 1;
+
+          await saveUsers({
+            [message.author.id]: initiatorProfile,
+            [targetUser.id]: freshTargetProfile
+          });
+
+          pendingTrades.delete(tradeId);
+
+          if (trade.timeoutId) {
+            clearTimeout(trade.timeoutId);
+          }
+
+          trade.stage = "completed";
+
+          await tradeMessage.edit({
+            embeds: [buildCharacterTradeEmbed("completed")],
+            components: []
+          });
+
+          await message.channel.send(
+            `${EMOJI.shenheSmile} Trade completed: ${message.author.username} traded **${initiatorSelection.resolved.name}** for **${targetSelection.resolved.name}** from ${targetUser.username}.`
+          );
+        } catch {
+          await message.channel.send(`${EMOJI.laylaHesitant} Trade could not be completed because a database update failed.`);
+          await cancelCharacterTrade("db-error");
+        }
+      };
+
+      trade.timeoutId = setTimeout(() => {
+        cancelCharacterTrade("expired").catch(() => {});
+      }, TRADE_OFFER_TIMEOUT_MS);
+
+      const collector = tradeMessage.createMessageComponentCollector({
+        time: TRADE_OFFER_TIMEOUT_MS
+      });
+
+      collector.on("collect", async (interaction) => {
+        if (!interaction.customId.startsWith(tradeId)) return;
+
+        if (![message.author.id, targetUser.id].includes(interaction.user.id)) {
+          await interaction.reply({
+            content: `${EMOJI.laylaHesitant} Only the two trading users can interact with this trade.`,
+            ephemeral: true
+          });
+          return;
+        }
+
+        if (interaction.customId.endsWith("_cancel")) {
+          await interaction.deferUpdate();
+          await cancelCharacterTrade("cancelled");
+          collector.stop("cancelled");
+          return;
+        }
+
+        if (interaction.customId.endsWith("_pick_initiator")) {
+          if (interaction.user.id !== message.author.id) {
+            await interaction.reply({
+              content: `${EMOJI.laylaHesitant} Only ${message.author.username} can pick this side.`,
+              ephemeral: true
+            });
+            return;
+          }
+
+          const selected = parseSelection(interaction.values[0]);
+          if (!selected) {
+            await interaction.reply({
+              content: `${EMOJI.laylaHesitant} Invalid selection. Try again.`,
+              ephemeral: true
+            });
+            return;
+          }
+
+          trade.selection.initiator = selected;
+          trade.locked.initiator = false;
+          await interaction.update({ embeds: [buildCharacterTradeEmbed()], components: buildCharacterTradeRows(false) });
+          return;
+        }
+
+        if (interaction.customId.endsWith("_pick_target")) {
+          if (interaction.user.id !== targetUser.id) {
+            await interaction.reply({
+              content: `${EMOJI.laylaHesitant} Only ${targetUser.username} can pick this side.`,
+              ephemeral: true
+            });
+            return;
+          }
+
+          const selected = parseSelection(interaction.values[0]);
+          if (!selected) {
+            await interaction.reply({
+              content: `${EMOJI.laylaHesitant} Invalid selection. Try again.`,
+              ephemeral: true
+            });
+            return;
+          }
+
+          trade.selection.target = selected;
+          trade.locked.target = false;
+          await interaction.update({ embeds: [buildCharacterTradeEmbed()], components: buildCharacterTradeRows(false) });
+          return;
+        }
+
+        if (interaction.customId.endsWith("_lock_initiator")) {
+          if (interaction.user.id !== message.author.id) {
+            await interaction.reply({
+              content: `${EMOJI.laylaHesitant} Only ${message.author.username} can lock this side.`,
+              ephemeral: true
+            });
+            return;
+          }
+
+          if (!trade.selection.initiator) {
+            await interaction.reply({
+              content: `${EMOJI.laylaHesitant} Pick your character first before locking in.`,
+              ephemeral: true
+            });
+            return;
+          }
+
+          trade.locked.initiator = !trade.locked.initiator;
+
+          if (trade.locked.initiator && trade.locked.target && trade.selection.initiator && trade.selection.target) {
+            await interaction.deferUpdate();
+            await finalizeCharacterTrade();
+            collector.stop("completed");
+            return;
+          }
+
+          await interaction.update({ embeds: [buildCharacterTradeEmbed()], components: buildCharacterTradeRows(false) });
+          return;
+        }
+
+        if (interaction.customId.endsWith("_lock_target")) {
+          if (interaction.user.id !== targetUser.id) {
+            await interaction.reply({
+              content: `${EMOJI.laylaHesitant} Only ${targetUser.username} can lock this side.`,
+              ephemeral: true
+            });
+            return;
+          }
+
+          if (!trade.selection.target) {
+            await interaction.reply({
+              content: `${EMOJI.laylaHesitant} Pick your character first before locking in.`,
+              ephemeral: true
+            });
+            return;
+          }
+
+          trade.locked.target = !trade.locked.target;
+
+          if (trade.locked.initiator && trade.locked.target && trade.selection.initiator && trade.selection.target) {
+            await interaction.deferUpdate();
+            await finalizeCharacterTrade();
+            collector.stop("completed");
+            return;
+          }
+
+          await interaction.update({ embeds: [buildCharacterTradeEmbed()], components: buildCharacterTradeRows(false) });
+        }
+      });
+
+      collector.on("end", async () => {
+        if (pendingTrades.has(tradeId)) {
+          pendingTrades.delete(tradeId);
+        }
+
+        if (trade.timeoutId) {
+          clearTimeout(trade.timeoutId);
+        }
+
+        if (trade.stage === "selecting") {
+          try {
+            await tradeMessage.edit({ components: [] });
+          } catch {
+            // Ignore edit errors when the message no longer exists.
+          }
+        }
+      });
+
+      return;
+    }
+
     if (restTokens[0]?.toLowerCase() !== "give") {
       await message.reply(
-        `${EMOJI.laylaHesitant} Usage: ${PREFIX}trade @user give <amount> <type> [item name] receive <amount> <type> [item name]`
+        [
+          `${EMOJI.laylaHesitant} Usage: ${PREFIX}trade @user`,
+          `Or: ${PREFIX}trade @user give <amount> <type> [item name] receive <amount> <type> [item name]`
+        ].join("\n")
       );
       return;
     }
