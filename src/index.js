@@ -780,7 +780,7 @@ client.on("messageCreate", async (message) => {
         `${PREFIX}answer <text> - answer active trivia`,
         `${PREFIX}clash - start an Elemental Clash raid with other players`,
         `${PREFIX}coinflip <heads|tails> <bet> - gamble primogems for a 50/50 payout`,
-        `${PREFIX}trade @user - open a dropdown trade UI (both users lock in to confirm)`,
+        `${PREFIX}trade @user - open a dropdown trade UI (both users lock in, then both press confirm)`,
         `${PREFIX}trade @user give <amount> <type> [item name] receive <amount> <type> [item name] - advanced text trade`,
         `${PREFIX}characters - show your owned character roster`,
         `${PREFIX}profile - show your primogems, pity, and inventory`,
@@ -972,6 +972,10 @@ client.on("messageCreate", async (message) => {
         locked: {
           initiator: false,
           target: false
+        },
+        confirmed: {
+          initiator: false,
+          target: false
         }
       };
 
@@ -997,15 +1001,16 @@ client.on("messageCreate", async (message) => {
               `**${targetUser.username} gives:** ${formatSelection(trade.selection.target)}`,
               "",
               `Lock status: ${message.author.username} ${trade.locked.initiator ? "✅" : "❌"} | ${targetUser.username} ${trade.locked.target ? "✅" : "❌"}`,
+              `Confirm status: ${message.author.username} ${trade.confirmed.initiator ? "✅" : "❌"} | ${targetUser.username} ${trade.confirmed.target ? "✅" : "❌"}`,
               "",
               stage === "completed"
                 ? `${EMOJI.shenheSmile} Trade completed.`
                 : stage === "cancelled"
                   ? `${EMOJI.laylaSad} Trade cancelled.`
-                  : `${EMOJI.laylaConfident} Pick one character each, then both users lock in.`
+                  : `${EMOJI.laylaConfident} Pick one character each, both users lock in, then both users press Confirm.`
             ].join("\n")
           )
-          .setFooter({ text: "Changing selection automatically unlocks your side." });
+          .setFooter({ text: "Changing selection or unlocking removes your confirm." });
       };
 
       const buildCharacterTradeRows = (disabled = false) => {
@@ -1054,6 +1059,16 @@ client.on("messageCreate", async (message) => {
               .setStyle(trade.locked.target ? ButtonStyle.Success : ButtonStyle.Primary)
               .setDisabled(disabled),
             new ButtonBuilder()
+              .setCustomId(`${tradeId}_confirm_initiator`)
+              .setLabel(trade.confirmed.initiator ? `${message.author.username} Confirmed` : `${message.author.username} Confirm`)
+              .setStyle(trade.confirmed.initiator ? ButtonStyle.Success : ButtonStyle.Secondary)
+              .setDisabled(disabled || !trade.locked.initiator || !trade.selection.initiator),
+            new ButtonBuilder()
+              .setCustomId(`${tradeId}_confirm_target`)
+              .setLabel(trade.confirmed.target ? `${targetUser.username} Confirmed` : `${targetUser.username} Confirm`)
+              .setStyle(trade.confirmed.target ? ButtonStyle.Success : ButtonStyle.Secondary)
+              .setDisabled(disabled || !trade.locked.target || !trade.selection.target),
+            new ButtonBuilder()
               .setCustomId(`${tradeId}_cancel`)
               .setLabel("Cancel")
               .setStyle(ButtonStyle.Danger)
@@ -1089,7 +1104,7 @@ client.on("messageCreate", async (message) => {
         }
 
         if (reason === "expired") {
-          await message.channel.send(`${EMOJI.laylaHesitant} Trade expired before both users locked in.`);
+          await message.channel.send(`${EMOJI.laylaHesitant} Trade expired before both users confirmed.`);
         }
       };
 
@@ -1199,6 +1214,7 @@ client.on("messageCreate", async (message) => {
 
           trade.selection.initiator = selected;
           trade.locked.initiator = false;
+          trade.confirmed.initiator = false;
           await interaction.update({ embeds: [buildCharacterTradeEmbed()], components: buildCharacterTradeRows(false) });
           return;
         }
@@ -1223,6 +1239,7 @@ client.on("messageCreate", async (message) => {
 
           trade.selection.target = selected;
           trade.locked.target = false;
+          trade.confirmed.target = false;
           await interaction.update({ embeds: [buildCharacterTradeEmbed()], components: buildCharacterTradeRows(false) });
           return;
         }
@@ -1245,13 +1262,7 @@ client.on("messageCreate", async (message) => {
           }
 
           trade.locked.initiator = !trade.locked.initiator;
-
-          if (trade.locked.initiator && trade.locked.target && trade.selection.initiator && trade.selection.target) {
-            await interaction.deferUpdate();
-            await finalizeCharacterTrade();
-            collector.stop("completed");
-            return;
-          }
+          trade.confirmed.initiator = false;
 
           await interaction.update({ embeds: [buildCharacterTradeEmbed()], components: buildCharacterTradeRows(false) });
           return;
@@ -1275,8 +1286,32 @@ client.on("messageCreate", async (message) => {
           }
 
           trade.locked.target = !trade.locked.target;
+          trade.confirmed.target = false;
 
-          if (trade.locked.initiator && trade.locked.target && trade.selection.initiator && trade.selection.target) {
+          await interaction.update({ embeds: [buildCharacterTradeEmbed()], components: buildCharacterTradeRows(false) });
+          return;
+        }
+
+        if (interaction.customId.endsWith("_confirm_initiator")) {
+          if (interaction.user.id !== message.author.id) {
+            await interaction.reply({
+              content: `${EMOJI.laylaHesitant} Only ${message.author.username} can confirm this side.`,
+              ephemeral: true
+            });
+            return;
+          }
+
+          if (!trade.selection.initiator || !trade.locked.initiator) {
+            await interaction.reply({
+              content: `${EMOJI.laylaHesitant} Select and lock your character before confirming.`,
+              ephemeral: true
+            });
+            return;
+          }
+
+          trade.confirmed.initiator = true;
+
+          if (trade.locked.initiator && trade.locked.target && trade.selection.initiator && trade.selection.target && trade.confirmed.initiator && trade.confirmed.target) {
             await interaction.deferUpdate();
             await finalizeCharacterTrade();
             collector.stop("completed");
@@ -1284,6 +1319,37 @@ client.on("messageCreate", async (message) => {
           }
 
           await interaction.update({ embeds: [buildCharacterTradeEmbed()], components: buildCharacterTradeRows(false) });
+          return;
+        }
+
+        if (interaction.customId.endsWith("_confirm_target")) {
+          if (interaction.user.id !== targetUser.id) {
+            await interaction.reply({
+              content: `${EMOJI.laylaHesitant} Only ${targetUser.username} can confirm this side.`,
+              ephemeral: true
+            });
+            return;
+          }
+
+          if (!trade.selection.target || !trade.locked.target) {
+            await interaction.reply({
+              content: `${EMOJI.laylaHesitant} Select and lock your character before confirming.`,
+              ephemeral: true
+            });
+            return;
+          }
+
+          trade.confirmed.target = true;
+
+          if (trade.locked.initiator && trade.locked.target && trade.selection.initiator && trade.selection.target && trade.confirmed.initiator && trade.confirmed.target) {
+            await interaction.deferUpdate();
+            await finalizeCharacterTrade();
+            collector.stop("completed");
+            return;
+          }
+
+          await interaction.update({ embeds: [buildCharacterTradeEmbed()], components: buildCharacterTradeRows(false) });
+          return;
         }
       });
 
