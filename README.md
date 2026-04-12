@@ -25,6 +25,9 @@ A Discord bot with:
 - Activity rewards
   - Non-command messages with at least 8 characters earn 8 primogems every 2 minutes
   - Adds small EXP gain from activity too
+- Coinflip betting with primogem rewards or losses (`!coinflip`)
+- Player-to-player trading with two-step approval (`!trade`)
+- Elemental Clash raid minigame with boss splash art and elemental reactions (`!clash`)
 
 ## Setup
 
@@ -62,6 +65,9 @@ npm start
 - `!wish 10`
 - `!trivia`
 - `!answer <text>`
+- `!clash`
+- `!coinflip <heads|tails> <bet>`
+- `!trade @user give <amount> <type> [item name] receive <amount> <type> [item name]`
 - `!profile`
 
 Passive system:
@@ -71,8 +77,8 @@ Passive system:
 
 ## Data Storage
 
-- User data is stored locally in `data/users.json`.
-- This includes primogems, pity counters, inventory, and active trivia state.
+- User profiles are stored in MongoDB through `MONGODB_URI`.
+- This includes primogems, pity counters, inventory, active trivia state, and trade updates.
 
 ## External API
 

@@ -18,6 +18,7 @@ const {
 } = require("discord.js");
 const { getTodayBanner, CHARACTERS, CHARACTER_ELEMENTS } = require("./data/banners");
 const { getRandomTrivia } = require("./data/trivia");
+const { startElementalClashSession } = require("./data/elementalClash");
 const { loadUsers, saveUsers, getProfile, loadUserProfile, saveUserProfile, connectDatabase } = require("./storage");
 
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -31,6 +32,7 @@ const ACTIVITY_MIN_MESSAGE_LEN = 8;
 const LEVEL_UP_REWARD_PRIMOS = Number.parseInt(process.env.LEVEL_UP_REWARD_PRIMOS || "25", 10);
 const GENSHIN_API_BASE = "https://genshin.jmp.blue";
 const WISH_ANIMATION_WAIT_MS = Number.parseInt(process.env.WISH_ANIMATION_WAIT_MS || "7000", 10);
+const TRADE_OFFER_TIMEOUT_MS = 10 * 60 * 1000;
 const PORT = Number.parseInt(process.env.PORT || "0", 10);
 const ROOT_DIR = path.resolve(__dirname, "..");
 const WISH_GIF_FILES = {
@@ -130,6 +132,12 @@ const CHARACTER_SLUG_OVERRIDES = {
   "shikanoin heizou": "shikanoin-heizou"
 };
 
+const TRADE_RARITY_LABELS = {
+  fiveStar: "5-star",
+  fourStar: "4-star",
+  threeStar: "3-star"
+};
+
 if (!TOKEN) {
   console.error("Missing DISCORD_TOKEN in .env");
   process.exit(1);
@@ -145,6 +153,7 @@ const client = new Client({
 });
 
 const ACTIVE_POOLS = CHARACTERS;
+const pendingTrades = new Map();
 
 function normalize(text) {
   return text.trim().toLowerCase().replace(/\s+/g, " ");
@@ -193,6 +202,10 @@ function wait(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, Math.max(0, ms));
   });
+}
+
+function flipCoin() {
+  return Math.random() < 0.5 ? "heads" : "tails";
 }
 
 function startHealthServer() {
@@ -415,6 +428,159 @@ function awardLevelUpPrimos(profile, levelsGained) {
   return bonusPrimos;
 }
 
+function normalizeTradeType(token) {
+  const compact = normalize(token).replace(/[^a-z0-9]/g, "");
+
+  if (["primogem", "primogems", "primo", "primos"].includes(compact)) {
+    return { kind: "primogems" };
+  }
+
+  if (["5star", "fivestar"].includes(compact)) {
+    return { kind: "item", rarity: "fiveStar", label: TRADE_RARITY_LABELS.fiveStar };
+  }
+
+  if (["4star", "fourstar"].includes(compact)) {
+    return { kind: "item", rarity: "fourStar", label: TRADE_RARITY_LABELS.fourStar };
+  }
+
+  if (["3star", "threestar"].includes(compact)) {
+    return { kind: "item", rarity: "threeStar", label: TRADE_RARITY_LABELS.threeStar };
+  }
+
+  return null;
+}
+
+function parseTradeSide(tokens) {
+  if (tokens.length < 2) return null;
+
+  const amount = Number.parseInt(tokens[0], 10);
+  if (!Number.isInteger(amount) || amount <= 0) return null;
+
+  const typeInfo = normalizeTradeType(tokens[1]);
+  if (!typeInfo) return null;
+
+  if (typeInfo.kind === "primogems") {
+    if (tokens.length !== 2) return null;
+
+    return {
+      kind: "primogems",
+      amount,
+      label: `${amount} primogems`
+    };
+  }
+
+  const itemName = tokens.slice(2).join(" ").trim();
+  if (!itemName) return null;
+
+  return {
+    kind: "item",
+    amount,
+    rarity: typeInfo.rarity,
+    rarityLabel: typeInfo.label,
+    itemName,
+    label: `${amount} x ${itemName} (${typeInfo.label})`
+  };
+}
+
+function formatTradeSide(side) {
+  return side.label;
+}
+
+function findInventoryEntry(bucket, itemName) {
+  const normalizedName = normalize(itemName);
+
+  for (const [existingName, count] of Object.entries(bucket)) {
+    if (normalize(existingName) === normalizedName) {
+      return { name: existingName, count };
+    }
+  }
+
+  return null;
+}
+
+function resolveTradeSide(profile, side) {
+  if (side.kind === "primogems") {
+    if (profile.primogems < side.amount) {
+      return { ok: false, reason: `needs ${side.amount} primogems but only has ${profile.primogems}` };
+    }
+
+    return { ok: true, resolvedSide: { ...side } };
+  }
+
+  const bucket = profile.inventory[side.rarity];
+  const entry = findInventoryEntry(bucket, side.itemName);
+
+  if (!entry) {
+    return { ok: false, reason: `does not own ${side.itemName}` };
+  }
+
+  if (entry.count < side.amount) {
+    return { ok: false, reason: `only has ${entry.count} of ${entry.name}` };
+  }
+
+  return {
+    ok: true,
+    resolvedSide: {
+      ...side,
+      itemName: entry.name
+    }
+  };
+}
+
+function applyTradeTransfer(profile, fromSide, toSide) {
+  if (fromSide.kind === "primogems") {
+    profile.primogems -= fromSide.amount;
+  } else {
+    const fromBucket = profile.inventory[fromSide.rarity];
+    fromBucket[fromSide.itemName] -= fromSide.amount;
+
+    if (fromBucket[fromSide.itemName] <= 0) {
+      delete fromBucket[fromSide.itemName];
+    }
+  }
+
+  if (toSide.kind === "primogems") {
+    profile.primogems += toSide.amount;
+    return;
+  }
+
+  const toBucket = profile.inventory[toSide.rarity];
+  toBucket[toSide.itemName] = (toBucket[toSide.itemName] || 0) + toSide.amount;
+}
+
+function buildTradeEmbed(trade, stage, initiatorName, targetName) {
+  return new EmbedBuilder()
+    .setTitle(`${EMOJI.shenheGroove} Trade Offer`)
+    .setColor(stage === "completed" ? 0x2ecc71 : stage === "cancelled" ? 0xe74c3c : 0xf39c12)
+    .setDescription(
+      [
+        `**From:** ${initiatorName}`,
+        `**To:** ${targetName}`,
+        `**Offer:** ${formatTradeSide(trade.offer)}`,
+        `**Request:** ${formatTradeSide(trade.request)}`,
+        "",
+        stage === "pendingTarget"
+          ? `${EMOJI.laylaConfident} Waiting for the target to accept.`
+          : stage === "pendingInitiator"
+            ? `${EMOJI.laylaConfident} Target accepted. Waiting for the proposer to confirm.`
+            : stage === "completed"
+              ? `${EMOJI.shenheSmile} Trade completed successfully.`
+              : `${EMOJI.laylaSad} Trade cancelled.`
+      ].join("\n")
+    )
+    .setFooter({ text: "Both players must approve before any inventory changes happen." });
+}
+
+function hasActiveTradeForUser(userId) {
+  for (const trade of pendingTrades.values()) {
+    if (trade.initiatorId === userId || trade.targetId === userId) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function buildWishResultEmbed(username, count, results, profile, bannerName, levelsGained, levelUpPrimos) {
   const summary = {
     five: results.filter((r) => r.rarity === "5-star").length,
@@ -569,6 +735,9 @@ client.on("messageCreate", async (message) => {
         `${PREFIX}wish [1|10] - spend primogems to wish`,
         `${PREFIX}trivia - get a trivia question for primogems`,
         `${PREFIX}answer <text> - answer active trivia`,
+        `${PREFIX}clash - start an Elemental Clash raid with other players`,
+        `${PREFIX}coinflip <heads|tails> <bet> - gamble primogems for a 50/50 payout`,
+        `${PREFIX}trade @user give <amount> <type> [item name] receive <amount> <type> [item name] - start a trade that both users must approve`,
         `${PREFIX}characters - show your owned character roster`,
         `${PREFIX}profile - show your primogems, pity, and inventory`,
         `Passive rewards: chat messages (>=${ACTIVITY_MIN_MESSAGE_LEN} chars) earn ${ACTIVITY_REWARD_PRIMOS} primogems every ${Math.floor(ACTIVITY_COOLDOWN_MS / 60000)} min`
@@ -637,6 +806,345 @@ client.on("messageCreate", async (message) => {
       );
 
     await message.reply({ embeds: [profileEmbed] });
+    return;
+  }
+
+  if (cmd === "clash") {
+    await startElementalClashSession({
+      message,
+      profile,
+      loadUsers,
+      getProfile,
+      saveUserProfile,
+      prefix: PREFIX,
+      emoji: EMOJI,
+      characterElements: CHARACTER_ELEMENTS
+    });
+    return;
+  }
+
+  if (cmd === "coinflip" || cmd === "flip") {
+    const guess = (args[0] || "").toLowerCase();
+    const bet = Number.parseInt(args[1] || "", 10);
+
+    if (!["heads", "tails"].includes(guess)) {
+      await message.reply(`${EMOJI.laylaHesitant} Usage: ${PREFIX}coinflip <heads|tails> <bet>`);
+      return;
+    }
+
+    if (!Number.isInteger(bet) || bet <= 0) {
+      await message.reply(`${EMOJI.laylaHesitant} Bet must be a positive number of primogems.`);
+      return;
+    }
+
+    if (profile.primogems < bet) {
+      await message.reply(
+        `${EMOJI.laylaHesitant} You only have ${profile.primogems} primogems, so you cannot bet ${bet}.`
+      );
+      return;
+    }
+
+    const result = flipCoin();
+    const win = result === guess;
+
+    profile.primogems += win ? bet : -bet;
+    await saveUserProfile(message.author.id, profile);
+
+    const embed = new EmbedBuilder()
+      .setTitle(`${EMOJI.primogem} Coinflip Result`)
+      .setColor(win ? 0x2ecc71 : 0xe74c3c)
+      .setDescription(
+        [
+          `You guessed: **${guess}**`,
+          `Result: **${result}**`,
+          `Bet: **${bet}** primogems`,
+          win
+            ? `You won **${bet}** primogems and now have **${profile.primogems}**.`
+            : `You lost **${bet}** primogems and now have **${profile.primogems}**.`
+        ].join("\n")
+      );
+
+    await message.reply({ embeds: [embed] });
+    return;
+  }
+
+  if (cmd === "trade") {
+    const targetUser = message.mentions.users.first() || (args[0] ? await client.users.fetch(args[0]).catch(() => null) : null);
+
+    if (!targetUser) {
+      await message.reply(
+        `${EMOJI.laylaHesitant} Usage: ${PREFIX}trade @user give <amount> <type> [item name] receive <amount> <type> [item name]`
+      );
+      return;
+    }
+
+    if (targetUser.bot) {
+      await message.reply(`${EMOJI.laylaHesitant} You cannot trade with bots.`);
+      return;
+    }
+
+    if (targetUser.id === message.author.id) {
+      await message.reply(`${EMOJI.laylaHesitant} You cannot trade with yourself.`);
+      return;
+    }
+
+    if (hasActiveTradeForUser(message.author.id) || hasActiveTradeForUser(targetUser.id)) {
+      await message.reply(`${EMOJI.laylaHesitant} One of those users already has a pending trade.`);
+      return;
+    }
+
+    const restTokens = message.content
+      .slice(PREFIX.length)
+      .trim()
+      .split(/\s+/)
+      .slice(2);
+
+    if (restTokens[0]?.toLowerCase() !== "give") {
+      await message.reply(
+        `${EMOJI.laylaHesitant} Usage: ${PREFIX}trade @user give <amount> <type> [item name] receive <amount> <type> [item name]`
+      );
+      return;
+    }
+
+    const receiveIndex = restTokens.findIndex((token) => token.toLowerCase() === "receive");
+    if (receiveIndex < 0) {
+      await message.reply(
+        `${EMOJI.laylaHesitant} Include both give and receive sections in the trade command.`
+      );
+      return;
+    }
+
+    const offerTokens = restTokens.slice(1, receiveIndex);
+    const requestTokens = restTokens.slice(receiveIndex + 1);
+
+    const offer = parseTradeSide(offerTokens);
+    const request = parseTradeSide(requestTokens);
+
+    if (!offer || !request) {
+      await message.reply(
+        [
+          `${EMOJI.laylaHesitant} Invalid trade format.`,
+          `Example: ${PREFIX}trade @user give 100 primogems receive 1 5-star Raiden Shogun`,
+          `Example: ${PREFIX}trade @user give 1 4-star Bennett receive 50 primogems`
+        ].join("\n")
+      );
+      return;
+    }
+
+    const tradeId = `trade_${message.id}`;
+    const trade = {
+      id: tradeId,
+      initiatorId: message.author.id,
+      targetId: targetUser.id,
+      offer,
+      request,
+      stage: "pendingTarget",
+      timeoutId: null
+    };
+
+    const buildTradeRows = (stage) => {
+      if (stage === "pendingTarget") {
+        return [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`${tradeId}_accept`)
+              .setLabel("Accept")
+              .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+              .setCustomId(`${tradeId}_decline`)
+              .setLabel("Decline")
+              .setStyle(ButtonStyle.Danger)
+          )
+        ];
+      }
+
+      if (stage === "pendingInitiator") {
+        return [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`${tradeId}_confirm`)
+              .setLabel("Confirm")
+              .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+              .setCustomId(`${tradeId}_cancel`)
+              .setLabel("Cancel")
+              .setStyle(ButtonStyle.Danger)
+          )
+        ];
+      }
+
+      return [];
+    };
+
+    const tradeMessage = await message.reply({
+      embeds: [buildTradeEmbed(trade, "pendingTarget", message.author.username, targetUser.username)],
+      components: buildTradeRows("pendingTarget")
+    });
+
+    pendingTrades.set(tradeId, trade);
+
+    const expireTrade = async (reason = "expired") => {
+      if (!pendingTrades.has(tradeId)) return;
+      pendingTrades.delete(tradeId);
+
+      if (trade.timeoutId) {
+        clearTimeout(trade.timeoutId);
+      }
+
+      trade.stage = "cancelled";
+
+      try {
+        await tradeMessage.edit({
+          embeds: [buildTradeEmbed(trade, "cancelled", message.author.username, targetUser.username)],
+          components: []
+        });
+      } catch {
+        // Ignore edit errors when the message no longer exists.
+      }
+
+      if (reason === "expired") {
+        await message.channel.send(`${EMOJI.laylaHesitant} Trade expired before both users approved it.`);
+      }
+    };
+
+    trade.timeoutId = setTimeout(() => {
+      expireTrade("expired").catch(() => {});
+    }, TRADE_OFFER_TIMEOUT_MS);
+
+    const collector = tradeMessage.createMessageComponentCollector({
+      componentType: ComponentType.Button,
+      time: TRADE_OFFER_TIMEOUT_MS
+    });
+
+    collector.on("collect", async (interaction) => {
+      if (!interaction.customId.startsWith(tradeId)) return;
+
+      if (trade.stage === "pendingTarget") {
+        if (interaction.user.id !== targetUser.id) {
+          await interaction.reply({
+            content: `${EMOJI.laylaHesitant} Only ${targetUser.username} can accept or decline this trade.`,
+            ephemeral: true
+          });
+          return;
+        }
+
+        if (interaction.customId.endsWith("_decline")) {
+          await interaction.deferUpdate();
+          await expireTrade("declined");
+          collector.stop("declined");
+          return;
+        }
+
+        await interaction.deferUpdate();
+
+        trade.stage = "pendingInitiator";
+        await tradeMessage.edit({
+          embeds: [buildTradeEmbed(trade, "pendingInitiator", message.author.username, targetUser.username)],
+          components: buildTradeRows("pendingInitiator")
+        });
+        return;
+      }
+
+      if (trade.stage === "pendingInitiator") {
+        if (interaction.user.id !== message.author.id) {
+          await interaction.reply({
+            content: `${EMOJI.laylaHesitant} Only ${message.author.username} can finalize this trade.`,
+            ephemeral: true
+          });
+          return;
+        }
+
+        if (interaction.customId.endsWith("_cancel")) {
+          await interaction.deferUpdate();
+          await expireTrade("cancelled");
+          collector.stop("cancelled");
+          return;
+        }
+
+        if (!interaction.customId.endsWith("_confirm")) {
+          return;
+        }
+
+        await interaction.deferUpdate();
+
+        try {
+          const users = await loadUsers();
+          const initiatorProfile = await getProfile(users, message.author.id);
+          const targetProfile = await getProfile(users, targetUser.id);
+          const resolvedOffer = resolveTradeSide(initiatorProfile, trade.offer);
+          const resolvedRequest = resolveTradeSide(targetProfile, trade.request);
+
+          if (!resolvedOffer.ok || !resolvedRequest.ok) {
+            const reason = !resolvedOffer.ok ? resolvedOffer.reason : resolvedRequest.reason;
+            pendingTrades.delete(tradeId);
+
+            if (trade.timeoutId) {
+              clearTimeout(trade.timeoutId);
+            }
+
+            trade.stage = "cancelled";
+
+            await tradeMessage.edit({
+              embeds: [buildTradeEmbed(trade, "cancelled", message.author.username, targetUser.username)],
+              components: []
+            });
+            await message.channel.send(`${EMOJI.laylaHesitant} Trade failed: ${reason}.`);
+            collector.stop("invalid-state");
+            return;
+          }
+
+          applyTradeTransfer(initiatorProfile, resolvedOffer.resolvedSide, resolvedRequest.resolvedSide);
+          applyTradeTransfer(targetProfile, resolvedRequest.resolvedSide, resolvedOffer.resolvedSide);
+
+          await saveUsers({
+            [message.author.id]: initiatorProfile,
+            [targetUser.id]: targetProfile
+          });
+        } catch (error) {
+          await message.channel.send(
+            `${EMOJI.laylaHesitant} Trade could not be completed because the database update failed. Please try again.`
+          );
+          return;
+        }
+
+        pendingTrades.delete(tradeId);
+
+        if (trade.timeoutId) {
+          clearTimeout(trade.timeoutId);
+        }
+
+        trade.stage = "completed";
+
+        await tradeMessage.edit({
+          embeds: [buildTradeEmbed(trade, "completed", message.author.username, targetUser.username)],
+          components: []
+        });
+
+        await message.channel.send(
+          `${EMOJI.shenheSmile} Trade completed between ${message.author.username} and ${targetUser.username}.`
+        );
+        collector.stop("completed");
+      }
+    });
+
+    collector.on("end", async () => {
+      if (pendingTrades.has(tradeId)) {
+        pendingTrades.delete(tradeId);
+      }
+
+      if (trade.timeoutId) {
+        clearTimeout(trade.timeoutId);
+      }
+
+      if (trade.stage === "pendingTarget" || trade.stage === "pendingInitiator") {
+        try {
+          await tradeMessage.edit({ components: [] });
+        } catch {
+          // Ignore edit errors when the message no longer exists.
+        }
+      }
+    });
+
     return;
   }
 
