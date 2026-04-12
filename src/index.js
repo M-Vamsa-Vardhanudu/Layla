@@ -17,7 +17,7 @@ const {
   ComponentType
 } = require("discord.js");
 const { getTodayBanner, CHARACTERS, CHARACTER_ELEMENTS } = require("./data/banners");
-const { TRIVIA_QUESTIONS, getRandomTrivia } = require("./data/trivia");
+const { getRandomTrivia } = require("./data/trivia");
 const { startElementalClashSession } = require("./data/elementalClash");
 const { loadUsers, saveUsers, getProfile, loadUserProfile, saveUserProfile, connectDatabase } = require("./storage");
 
@@ -219,8 +219,7 @@ function isTriviaAnswerCorrect(userInput, answers) {
 function buildTriviaOptions(trivia, optionCount = 4) {
   const correctAnswer = (trivia.answers && trivia.answers[0]) || "Unknown";
   const correctNormalized = new Set((trivia.answers || []).map((answer) => normalizeAnswer(answer)).filter(Boolean));
-  const distractorPool = TRIVIA_QUESTIONS
-    .flatMap((question) => (question.answers && question.answers[0] ? [question.answers[0]] : []))
+  const distractorPool = (trivia.options || [])
     .filter((candidate) => !correctNormalized.has(normalizeAnswer(candidate)));
 
   const used = new Set([normalizeAnswer(correctAnswer)]);
