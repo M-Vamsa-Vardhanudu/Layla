@@ -155,8 +155,23 @@ function toCharacterSlug(name) {
   return CHARACTER_SLUG_OVERRIDES[normalized] || normalized.replace(/\s+/g, "-");
 }
 
+function toWeaponSlug(name) {
+  return normalize(name)
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-");
+}
+
 function characterCardUrl(name) {
   return `${GENSHIN_API_BASE}/characters/${toCharacterSlug(name)}/card`;
+}
+
+function weaponIconUrl(name) {
+  return `${GENSHIN_API_BASE}/weapons/${toWeaponSlug(name)}/icon`;
+}
+
+function wishItemImageUrl(result) {
+  if (!result) return null;
+  return result.rarity === "3-star" ? weaponIconUrl(result.item) : characterCardUrl(result.item);
 }
 
 function wishGifUrl(rarity) {
@@ -457,6 +472,10 @@ function buildWishResultEmbed(username, count, results, profile, bannerName, lev
     });
   }
 
+  if (count === 1 && results[0]) {
+    embed.setImage(wishItemImageUrl(results[0]));
+  }
+
   return embed;
 }
 
@@ -497,8 +516,9 @@ function buildWishSlideEmbed(username, bannerName, results, index) {
     .setColor(color)
     .setFooter({ text: `${bannerName} • Use Reveal to continue or Skip to jump to highlights` });
 
-  if (result.rarity !== "3-star") {
-    embed.setImage(characterCardUrl(result.item));
+  const imageUrl = wishItemImageUrl(result);
+  if (imageUrl) {
+    embed.setImage(imageUrl);
   }
 
   return embed;
@@ -806,7 +826,7 @@ client.on("messageCreate", async (message) => {
       .setTitle(`${EMOJI.shenheGroove} Wish Animation`)
       .setDescription("The wish is unfolding...")
       .setColor(animationColor)
-      .setImage(animationImage || (amount === 10 ? characterCardUrl(banner.featuredFiveStar) : characterCardUrl(results[0].item)));
+      .setImage(animationImage || (amount === 10 ? characterCardUrl(banner.featuredFiveStar) : wishItemImageUrl(results[0])));
 
     await message.channel.send({ embeds: [animationEmbed], files: attachmentFiles });
     await wait(WISH_ANIMATION_WAIT_MS);
