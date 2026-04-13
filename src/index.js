@@ -24,7 +24,7 @@ const { loadUsers, saveUsers, getProfile, loadUserProfile, saveUserProfile, conn
 const TOKEN = process.env.DISCORD_TOKEN;
 const PREFIX = process.env.PREFIX || "!";
 const WISH_COST = 160;
-const TRIVIA_COOLDOWN_MS = 15 * 1000;
+const TRIVIA_COOLDOWN_MS = 3 * 1000;
 const ACTIVITY_COOLDOWN_MS = 2 * 60 * 1000;
 const ACTIVITY_REWARD_PRIMOS = 8;
 const ACTIVITY_REWARD_EXP = 4;
@@ -889,10 +889,10 @@ function buildWishSlideEmbed(username, bannerName, results, index) {
     .setTitle(`${EMOJI.shenheGroove} ${username}'s 10-Pull Reveal`)
     .setDescription(
       [
-        `Pull **${index + 1}/${results.length}**`,
-        `Result: **${result.item}**`,
-        `Rarity: **${result.rarity}**${result.featured ? " (featured)" : ""}`,
-        `Element: ${elementText}`
+        `${AESTHETIC_EMOJIS[0]} Pull **${index + 1}/${results.length}**`,
+        `${AESTHETIC_EMOJIS[1]} Result: **${result.item}**`,
+        `${AESTHETIC_EMOJIS[2]} Rarity: **${result.rarity}**${result.featured ? " (featured)" : ""}`,
+        `${AESTHETIC_EMOJIS[3]} Element: ${elementText}`
       ].join("\n")
     )
     .setColor(color)
@@ -2056,11 +2056,6 @@ client.on("messageCreate", async (message) => {
           .setStyle(ButtonStyle.Primary)
           .setDisabled(completed || summaryShown),
         new ButtonBuilder()
-          .setCustomId(`${revealIdPrefix}_skip`)
-          .setLabel("Skip")
-          .setStyle(ButtonStyle.Secondary)
-          .setDisabled(completed || summaryShown),
-        new ButtonBuilder()
           .setCustomId(`${revealIdPrefix}_summary`)
           .setLabel("Summary")
           .setStyle(ButtonStyle.Success)
@@ -2124,11 +2119,6 @@ client.on("messageCreate", async (message) => {
           content: `${EMOJI.laylaHesitant} This reveal belongs to ${message.author.username}.`,
           ephemeral: true
         });
-        return;
-      }
-
-      if (interaction.customId.endsWith("_skip")) {
-        await showSummary(interaction);
         return;
       }
 
