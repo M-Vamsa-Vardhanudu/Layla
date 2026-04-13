@@ -24,6 +24,7 @@ const { loadUsers, saveUsers, getProfile, loadUserProfile, saveUserProfile, conn
 const TOKEN = process.env.DISCORD_TOKEN;
 const PREFIX = process.env.PREFIX || "!";
 const WISH_COST = 160;
+const WISH_EMBED_COLOR = 0xf39c12;
 const TRIVIA_COOLDOWN_MS = 3 * 1000;
 const ACTIVITY_COOLDOWN_MS = 2 * 60 * 1000;
 const ACTIVITY_REWARD_PRIMOS = 8;
@@ -813,11 +814,10 @@ function buildWishResultEmbed(username, count, results, profile, bannerName, lev
     })
     .slice(0, 10);
 
-  const rarityColor = summary.five > 0 ? 0xf39c12 : summary.four > 0 ? 0x3498db : 0x95a5a6;
   const embed = new EmbedBuilder()
     .setTitle(`${EMOJI.shenhePeek} ${username}'s Wish Results`)
     .setDescription(`**${count} wishes** on **${bannerName}**`)
-    .setColor(rarityColor)
+    .setColor(WISH_EMBED_COLOR)
     .addFields(
       {
         name: `${EMOJI.shenheGroove} Pull Summary`,
@@ -866,14 +866,13 @@ function buildWishHighlightEmbeds(results) {
     .filter((result) => result.rarity !== "3-star")
     .slice(0, 10)
     .map((result, index) => {
-      const color = result.rarity === "5-star" ? 0xf39c12 : 0x3498db;
       const elementKey = CHARACTER_ELEMENTS[result.item] || "";
       const elementEmoji = elementEmojiForKey(elementKey);
       const elementText = elementKey ? `${elementEmoji} ${titleCase(elementKey)}` : "Unknown Element";
       return new EmbedBuilder()
         .setTitle(`Highlight ${index + 1}: ${result.item}`)
         .setDescription(`${result.rarity}${result.featured ? " (featured)" : ""}\n${elementText}`)
-        .setColor(color)
+        .setColor(WISH_EMBED_COLOR)
         .setImage(characterCardUrl(result.item));
     });
 }
@@ -883,8 +882,6 @@ function buildWishSlideEmbed(username, bannerName, results, index) {
   const elementKey = CHARACTER_ELEMENTS[result.item] || "";
   const elementEmoji = elementEmojiForKey(elementKey);
   const elementText = elementKey ? `${elementEmoji} ${titleCase(elementKey)}` : "N/A";
-  const color = result.rarity === "5-star" ? 0xf39c12 : result.rarity === "4-star" ? 0x3498db : 0x95a5a6;
-
   const embed = new EmbedBuilder()
     .setTitle(`${EMOJI.shenheGroove} ${username}'s 10-Pull Reveal`)
     .setDescription(
@@ -895,7 +892,7 @@ function buildWishSlideEmbed(username, bannerName, results, index) {
         `${AESTHETIC_EMOJIS[3]} Element: ${elementText}`
       ].join("\n")
     )
-    .setColor(color)
+    .setColor(WISH_EMBED_COLOR)
     .setFooter({ text: `${bannerName} • Use Reveal to continue or Summary to view the collage` });
 
   const imageUrl = wishItemImageUrl(result);
@@ -2014,11 +2011,10 @@ client.on("messageCreate", async (message) => {
       animationImage = wishGifUrl(animationRarity);
     }
 
-    const animationColor = animationRarity === "5-star" ? 0xf39c12 : animationRarity === "4-star" ? 0x3498db : 0x95a5a6;
     const animationEmbed = new EmbedBuilder()
       .setTitle(`${EMOJI.shenheGroove} Wish Animation`)
       .setDescription("The wish is unfolding...")
-      .setColor(animationColor)
+      .setColor(WISH_EMBED_COLOR)
       .setImage(animationImage || (amount === 10 ? characterCardUrl(banner.featuredFiveStar) : wishItemImageUrl(results[0])));
 
     const revealMessage = await message.channel.send({ embeds: [animationEmbed], files: attachmentFiles });
