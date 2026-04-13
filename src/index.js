@@ -71,6 +71,15 @@ const EMOJI = {
   pyro: "<:GenshinImpactFireElementIconPyro:1492352295814303904>",
   hydro: "<:GenshinImpactHydroElement768x768:1492352293264429238>"
 };
+const AESTHETIC_EMOJIS = [
+  "<a:heartneon:1493248741153706175>",
+  "<a:nabluehearts:1493248753816047646>",
+  "<a:NeonFire:1493248755649220880>",
+  "<a:Neon_heart_floating73:1493248759071637574>",
+  "<a:vaflyinghearts21:1493248761617584331>",
+  "<a:aheartneonpink:1493248732819361945>"
+];
+const AESTHETIC_SEPARATOR = "---------";
 
 function numberToEmojiText(value) {
   const digitMap = {
@@ -96,6 +105,13 @@ function titleCase(text) {
   return String(text || "")
     .toLowerCase()
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatAestheticBlock(lines) {
+  return lines
+    .filter((line) => line !== null && line !== undefined && String(line).trim().length > 0)
+    .map((line, index) => `${AESTHETIC_EMOJIS[index % AESTHETIC_EMOJIS.length]} ${line}`)
+    .join(`\n${AESTHETIC_SEPARATOR}\n`);
 }
 
 function elementEmojiForKey(elementKey) {
@@ -481,6 +497,69 @@ async function buildFiveStarCollage(characterNames) {
     .toBuffer();
 }
 
+async function buildWishHighlightsCollage(results) {
+  const highlightResults = results.filter((result) => result.rarity !== "3-star").slice(0, 10);
+  if (highlightResults.length === 0) {
+    return null;
+  }
+
+  const cardWidth = 280;
+  const cardHeight = 420;
+  const gap = 14;
+  const columns = Math.min(3, highlightResults.length);
+  const rows = Math.ceil(highlightResults.length / columns);
+
+  const cardBuffers = await Promise.all(highlightResults.map(async (result) => {
+    try {
+      const response = await fetch(characterCardUrl(result.item));
+      if (!response.ok) {
+        return sharp({
+          create: {
+            width: cardWidth,
+            height: cardHeight,
+            channels: 4,
+            background: { r: 24, g: 26, b: 38, alpha: 1 }
+          }
+        }).png().toBuffer();
+      }
+
+      const raw = Buffer.from(await response.arrayBuffer());
+      return sharp(raw)
+        .resize(cardWidth, cardHeight, { fit: "cover" })
+        .png()
+        .toBuffer();
+    } catch {
+      return sharp({
+        create: {
+          width: cardWidth,
+          height: cardHeight,
+          channels: 4,
+          background: { r: 24, g: 26, b: 38, alpha: 1 }
+        }
+      }).png().toBuffer();
+    }
+  }));
+
+  const totalWidth = columns * cardWidth + (columns - 1) * gap;
+  const totalHeight = rows * cardHeight + (rows - 1) * gap;
+
+  return sharp({
+    create: {
+      width: totalWidth,
+      height: totalHeight,
+      channels: 4,
+      background: { r: 15, g: 17, b: 24, alpha: 1 }
+    }
+  })
+    .composite(cardBuffers.map((buffer, index) => ({
+      input: buffer,
+      left: (index % columns) * (cardWidth + gap),
+      top: Math.floor(index / columns) * (cardHeight + gap)
+    })))
+    .png()
+    .toBuffer();
+}
+
 function formatRosterEntries(bucket, limit = 12) {
   const entries = Object.entries(bucket).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   const shown = entries.slice(0, limit).map(([name, count]) => {
@@ -716,7 +795,7 @@ function resolveCharacterTradeSelection(profile, selection) {
   };
 }
 
-function buildWishResultEmbed(username, count, results, profile, bannerName, levelsGained, levelUpPrimos) {
+function buildWishResultEmbed(username, count, results, profile, bannerName, levelsGained, levelUpPrimos, summaryImage = null) {
   const summary = {
     five: results.filter((r) => r.rarity === "5-star").length,
     four: results.filter((r) => r.rarity === "4-star").length,
@@ -773,7 +852,9 @@ function buildWishResultEmbed(username, count, results, profile, bannerName, lev
     });
   }
 
-  if (count === 1 && results[0]) {
+  if (summaryImage) {
+    embed.setImage(summaryImage);
+  } else if (count === 1 && results[0]) {
     embed.setImage(wishItemImageUrl(results[0]));
   }
 
@@ -815,7 +896,7 @@ function buildWishSlideEmbed(username, bannerName, results, index) {
       ].join("\n")
     )
     .setColor(color)
-    .setFooter({ text: `${bannerName} • Use Reveal to continue or Skip to jump to highlights` });
+    .setFooter({ text: `${bannerName} • Use Reveal to continue or Summary to view the collage` });
 
   const imageUrl = wishItemImageUrl(result);
   if (imageUrl) {
@@ -863,22 +944,26 @@ client.on("messageCreate", async (message) => {
   const cmd = (command || "").toLowerCase();
 
   if (cmd === "help") {
-    await message.reply(
-      [
-        `${EMOJI.shenheSmile} Genshin Wish Bot Commands`,
-        `${PREFIX}banner - show active banner`,
-        `${PREFIX}wish [1|10] - spend primogems to wish`,
-        `${PREFIX}trivia - get a dropdown trivia question for primogems`,
-        `${PREFIX}answer <text> - optional text fallback for active trivia`,
-        `${PREFIX}clash - start an Elemental Clash raid with other players`,
-        `${PREFIX}coinflip <heads|tails> <bet> - gamble primogems for a 50/50 payout`,
-        `${PREFIX}trade @user - open a dropdown trade UI (both users lock in, then both press confirm)`,
-        `${PREFIX}trade @user give <amount> <type> [item name] receive <amount> <type> [item name] - advanced text trade`,
-        `${PREFIX}characters - show your owned character roster`,
-        `${PREFIX}profile - show your primogems, pity, and inventory`,
-        `Passive rewards: chat messages (>=${ACTIVITY_MIN_MESSAGE_LEN} chars) earn ${ACTIVITY_REWARD_PRIMOS} primogems every ${Math.floor(ACTIVITY_COOLDOWN_MS / 60000)} min`
-      ].join("\n")
-    );
+    const helpEmbed = new EmbedBuilder()
+      .setTitle(`${EMOJI.shenheSmile} Genshin Wish Bot Commands`)
+      .setColor(0xe6b8ff)
+      .setDescription(
+        formatAestheticBlock([
+          `${PREFIX}banner - show active banner`,
+          `${PREFIX}wish [1|10] - spend primogems to wish`,
+          `${PREFIX}trivia - get a dropdown trivia question for primogems`,
+          `${PREFIX}answer <text> - optional text fallback for active trivia`,
+          `${PREFIX}clash - start an Elemental Clash raid with other players`,
+          `${PREFIX}coinflip <heads|tails> <bet> - gamble primogems for a 50/50 payout`,
+          `${PREFIX}trade @user - open a dropdown trade UI (both users lock in, then both press confirm)`,
+          `${PREFIX}characters - show your owned character roster`,
+          `${PREFIX}primogems - show your current primogems`,
+          `${PREFIX}profile - show your primogems, pity, and inventory`,
+          `Passive rewards: chat messages (>=${ACTIVITY_MIN_MESSAGE_LEN} chars) earn ${ACTIVITY_REWARD_PRIMOS} primogems every ${Math.floor(ACTIVITY_COOLDOWN_MS / 60000)} min`
+        ])
+      );
+
+    await message.reply({ embeds: [helpEmbed] });
     return;
   }
 
@@ -888,11 +973,11 @@ client.on("messageCreate", async (message) => {
     const embed = new EmbedBuilder()
       .setTitle(`Today's Banner: ${banner.name}`)
       .setDescription(
-        [
+        formatAestheticBlock([
           `${EMOJI.shenheGroove} Featured 5-star: ${banner.featuredFiveStar}`,
           `${EMOJI.laylaConfident} Featured 4-stars: ${banner.featuredFourStars.join(", ")}`,
           `${EMOJI.primogem} Wish cost: ${WISH_COST} primogems per pull`
-        ].join("\n")
+        ])
       )
       .setColor(0xf1c40f)
       .setImage(characterCardUrl(banner.featuredFiveStar));
@@ -912,21 +997,39 @@ client.on("messageCreate", async (message) => {
     const profileEmbed = new EmbedBuilder()
       .setTitle(`${EMOJI.shenhePeek} ${message.author.username}'s Profile`)
       .setColor(0x5dade2)
-      .setDescription(`${EMOJI.primogem} **Primogems:** ${profile.primogems}`)
+      .setDescription(
+        formatAestheticBlock([
+          `Primogems: **${profile.primogems}**`,
+          `Level: **${profile.level}**`,
+          `Total wishes: **${profile.wishes}**`
+        ])
+      )
       .addFields(
         {
           name: `${EMOJI.shenheSmile} Progress`,
-          value: `**Level:** ${profile.level}\n**EXP:** ${profile.exp} / ${profile.level * 100}\n**Total wishes:** ${profile.wishes}`,
+          value: formatAestheticBlock([
+            `Level: **${profile.level}**`,
+            `EXP: **${profile.exp} / ${profile.level * 100}**`,
+            `Total wishes: **${profile.wishes}**`
+          ]),
           inline: false
         },
         {
           name: `${EMOJI.laylaHesitant} Pity & Guarantee`,
-          value: `5-star: **${profile.pity5}/90**\n4-star: **${profile.pity4}/10**\nFeatured guarantee: **${profile.guaranteedFeatured5 ? "ON" : "OFF"}**`,
+          value: formatAestheticBlock([
+            `5-star: **${profile.pity5}/90**`,
+            `4-star: **${profile.pity4}/10**`,
+            `Featured guarantee: **${profile.guaranteedFeatured5 ? "ON" : "OFF"}**`
+          ]),
           inline: false
         },
         {
           name: `${EMOJI.laylaConfident} Inventory Totals`,
-          value: `5-star: **${fiveStarCount}**\n4-star: **${fourStarCount}**\n3-star: **${threeStarCount}**`,
+          value: formatAestheticBlock([
+            `5-star: **${fiveStarCount}**`,
+            `4-star: **${fourStarCount}**`,
+            `3-star: **${threeStarCount}**`
+          ]),
           inline: true
         },
         {
@@ -942,6 +1045,22 @@ client.on("messageCreate", async (message) => {
       );
 
     await message.reply({ embeds: [profileEmbed] });
+    return;
+  }
+
+  if (cmd === "primogems") {
+    const primogemsEmbed = new EmbedBuilder()
+      .setTitle(`${EMOJI.primogem} ${message.author.username}'s Primogems`)
+      .setColor(0x5dade2)
+      .setDescription(
+        formatAestheticBlock([
+          `Primogems: **${profile.primogems}**`,
+          `Level: **${profile.level}**`,
+          `Total wishes: **${profile.wishes}**`
+        ])
+      );
+
+    await message.reply({ embeds: [primogemsEmbed] });
     return;
   }
 
@@ -990,14 +1109,14 @@ client.on("messageCreate", async (message) => {
       .setTitle(`${EMOJI.primogem} Coinflip Result`)
       .setColor(win ? 0x2ecc71 : 0xe74c3c)
       .setDescription(
-        [
+        formatAestheticBlock([
           `You guessed: **${guess}**`,
           `Result: **${result}**`,
           `Bet: **${bet}** primogems`,
           win
             ? `You won **${bet}** primogems and now have **${profile.primogems}**.`
             : `You lost **${bet}** primogems and now have **${profile.primogems}**.`
-        ].join("\n")
+        ])
       );
 
     await message.reply({ embeds: [embed] });
@@ -1009,7 +1128,7 @@ client.on("messageCreate", async (message) => {
 
     if (!targetUser) {
       await message.reply(
-        `${EMOJI.laylaHesitant} Usage: ${PREFIX}trade @user give <amount> <type> [item name] receive <amount> <type> [item name]`
+        `${EMOJI.laylaHesitant} Usage: ${PREFIX}trade @user`
       );
       return;
     }
@@ -1088,19 +1207,17 @@ client.on("messageCreate", async (message) => {
           .setTitle(`${EMOJI.shenheGroove} Character Trade Setup`)
           .setColor(stage === "completed" ? 0x2ecc71 : stage === "cancelled" ? 0xe74c3c : 0x3498db)
           .setDescription(
-            [
+            formatAestheticBlock([
               `**${message.author.username} gives:** ${formatSelection(trade.selection.initiator)}`,
               `**${targetUser.username} gives:** ${formatSelection(trade.selection.target)}`,
-              "",
               `Lock status: ${message.author.username} ${trade.locked.initiator ? "✅" : "❌"} | ${targetUser.username} ${trade.locked.target ? "✅" : "❌"}`,
               `Confirm status: ${message.author.username} ${trade.confirmed.initiator ? "✅" : "❌"} | ${targetUser.username} ${trade.confirmed.target ? "✅" : "❌"}`,
-              "",
               stage === "completed"
                 ? `${EMOJI.shenheSmile} Trade completed.`
                 : stage === "cancelled"
                   ? `${EMOJI.laylaSad} Trade cancelled.`
                   : `${EMOJI.laylaConfident} Pick one character each, both users lock in, then both users press Confirm.`
-            ].join("\n")
+            ])
           )
           .setFooter({ text: "Changing selection or unlocking removes your confirm." });
       };
@@ -1468,10 +1585,7 @@ client.on("messageCreate", async (message) => {
 
     if (restTokens[0]?.toLowerCase() !== "give") {
       await message.reply(
-        [
-          `${EMOJI.laylaHesitant} Usage: ${PREFIX}trade @user`,
-          `Or: ${PREFIX}trade @user give <amount> <type> [item name] receive <amount> <type> [item name]`
-        ].join("\n")
+        `${EMOJI.laylaHesitant} Usage: ${PREFIX}trade @user`
       );
       return;
     }
@@ -1881,7 +1995,8 @@ client.on("messageCreate", async (message) => {
       profile,
       banner.name,
       levelsGained,
-      levelUpPrimos
+      levelUpPrimos,
+      null
     );
 
     const animationRarity = amount === 10
@@ -1906,39 +2021,76 @@ client.on("messageCreate", async (message) => {
       .setColor(animationColor)
       .setImage(animationImage || (amount === 10 ? characterCardUrl(banner.featuredFiveStar) : wishItemImageUrl(results[0])));
 
-    await message.channel.send({ embeds: [animationEmbed], files: attachmentFiles });
+    const revealMessage = await message.channel.send({ embeds: [animationEmbed], files: attachmentFiles });
     await wait(WISH_ANIMATION_WAIT_MS);
 
-    const highlightEmbeds = buildWishHighlightEmbeds(results);
+    const highlightSummaryBuffer = amount === 10 ? await buildWishHighlightsCollage(results) : null;
+    const highlightSummaryAttachment = highlightSummaryBuffer ? new AttachmentBuilder(highlightSummaryBuffer, { name: "wish-summary.png" }) : null;
+    const summaryEmbed = amount === 10
+      ? buildWishResultEmbed(
+          message.author.username,
+          amount,
+          results,
+          profile,
+          banner.name,
+          levelsGained,
+          levelUpPrimos,
+          highlightSummaryAttachment ? "attachment://wish-summary.png" : null
+        )
+      : resultEmbed;
 
     if (amount !== 10) {
-      if (highlightEmbeds.length > 0) {
-        await message.channel.send({ embeds: highlightEmbeds });
-      }
-
       await message.reply({ embeds: [resultEmbed] });
       return;
     }
 
     let revealIndex = 0;
+    let summaryShown = false;
     const revealIdPrefix = `wish_reveal_${message.id}`;
 
-    const buildRevealRows = (completed) => [
+    const buildRevealRows = (completed, summaryActive = true) => [
       new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId(`${revealIdPrefix}_next`)
           .setLabel("⬅ Reveal")
           .setStyle(ButtonStyle.Primary)
-          .setDisabled(completed),
+          .setDisabled(completed || summaryShown),
         new ButtonBuilder()
           .setCustomId(`${revealIdPrefix}_skip`)
           .setLabel("Skip")
           .setStyle(ButtonStyle.Secondary)
-          .setDisabled(completed)
+          .setDisabled(completed || summaryShown),
+        new ButtonBuilder()
+          .setCustomId(`${revealIdPrefix}_summary`)
+          .setLabel("Summary")
+          .setStyle(ButtonStyle.Success)
+          .setDisabled(!summaryActive || summaryShown)
       )
     ];
 
-    const revealMessage = await message.channel.send({
+    const showSummary = async (interaction = null) => {
+      if (summaryShown) return;
+      summaryShown = true;
+
+      const payload = {
+        embeds: [summaryEmbed],
+        components: buildRevealRows(true, false)
+      };
+
+      if (highlightSummaryAttachment) {
+        payload.files = [highlightSummaryAttachment];
+      }
+
+      if (interaction) {
+        await interaction.update(payload);
+      } else {
+        await revealMessage.edit(payload);
+      }
+
+      revealCollector.stop("summary");
+    };
+
+    await revealMessage.edit({
       embeds: [buildWishSlideEmbed(message.author.username, banner.name, results, revealIndex)],
       components: buildRevealRows(false)
     });
@@ -1948,17 +2100,15 @@ client.on("messageCreate", async (message) => {
       if (finalized) return;
       finalized = true;
 
+      if (summaryShown) {
+        return;
+      }
+
       try {
-        await revealMessage.edit({ components: buildRevealRows(true) });
+        await revealMessage.edit({ components: buildRevealRows(true, false) });
       } catch {
         // Ignore edit errors if message was removed.
       }
-
-      if (highlightEmbeds.length > 0) {
-        await message.channel.send({ embeds: highlightEmbeds });
-      }
-
-      await message.reply({ embeds: [resultEmbed] });
     };
 
     const revealCollector = revealMessage.createMessageComponentCollector({
@@ -1978,11 +2128,12 @@ client.on("messageCreate", async (message) => {
       }
 
       if (interaction.customId.endsWith("_skip")) {
-        await interaction.update({
-          embeds: [buildWishSlideEmbed(message.author.username, banner.name, results, revealIndex)],
-          components: buildRevealRows(true)
-        });
-        revealCollector.stop("skipped");
+        await showSummary(interaction);
+        return;
+      }
+
+      if (interaction.customId.endsWith("_summary")) {
+        await showSummary(interaction);
         return;
       }
 
@@ -1991,12 +2142,8 @@ client.on("messageCreate", async (message) => {
 
       await interaction.update({
         embeds: [buildWishSlideEmbed(message.author.username, banner.name, results, revealIndex)],
-        components: buildRevealRows(completed)
+        components: buildRevealRows(completed, true)
       });
-
-      if (completed) {
-        revealCollector.stop("completed");
-      }
     });
 
     revealCollector.on("end", async () => {
