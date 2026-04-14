@@ -459,11 +459,20 @@ function getCharacterDamageVariance(rarity) {
   return 0.9 + Math.random() * 0.2;
 }
 
-function getCharacterWinRate(rarity) {
-  if (rarity === "fiveStar") {
-    return 0.75;
-  }
-  return 0.65;
+function getElementMatchupType(element, boss) {
+  const upper = String(element || "").toUpperCase();
+  if (upper === boss.resistance) return "resisted";
+  if (boss.weakElements.includes(upper)) return "strong";
+  return "neutral";
+}
+
+function getTurnLossChance(player, boss) {
+  const matchup = getElementMatchupType(player.element, boss);
+  const baseLossChance = matchup === "resisted" ? 0.75 : matchup === "strong" ? 0.2 : 0.25;
+  const rarityAdjustment = player.character.rarity === "fiveStar" ? -0.03 : 0.03;
+  const randomSwing = (0.05 + Math.random() * 0.1) * (Math.random() < 0.5 ? -1 : 1);
+  const chance = baseLossChance + rarityAdjustment + randomSwing;
+  return Math.max(0.05, Math.min(0.95, chance));
 }
 
 function calcMoveMultiplier(moveType) {
@@ -662,6 +671,39 @@ async function startElementalClashSession({
     const battleMessage = lobbyMessage;
     const totalRounds = ROUND_COUNT;
 
+    const alivePlayers = session.players.filter((player) => player.active);
+    const allResisted = alivePlayers.length > 0 && alivePlayers.every((player) => getElementMatchupType(player.element, session.boss) === "resisted");
+
+    if (allResisted) {
+      session.round = 1;
+      session.combatLog.push("All selected elements are resisted by the boss.");
+      session.combatLog.push("Element mismatch forced an immediate defeat.");
+
+      const rewardLineImmediate = await grantRewards(session, saveUserProfile, loadUsers, getProfile, emoji, false);
+      const finalBufferImmediate = await renderBossCardBuffer({
+        boss: session.boss,
+        hpRemaining: Math.max(0, session.bossHp),
+        round: session.round,
+        totalRounds: ROUND_COUNT,
+        fieldAura: session.boss.aura,
+        players: session.players,
+        combatLog: session.combatLog
+      });
+
+      const finalFileImmediate = new AttachmentBuilder(finalBufferImmediate, { name: "clash-final.webp" });
+      const finalOutcomeImmediate = `${emoji.laylaSad} All party elements were resisted by ${session.boss.name}, so the raid failed immediately.\n${rewardLineImmediate}`;
+      const finalEmbedImmediate = buildFinalEmbed(session, emoji, finalOutcomeImmediate);
+
+      await battleMessage.edit({
+        embeds: [finalEmbedImmediate],
+        files: [finalFileImmediate],
+        components: []
+      });
+
+      await cleanup();
+      return;
+    }
+
     for (let round = 1; round <= totalRounds; round += 1) {
       session.round = round;
       const fieldAura = pick(ELEMENTS);
@@ -770,12 +812,14 @@ async function startElementalClashSession({
         const power = calcCharacterPower(player);
         const variance = getCharacterDamageVariance(player.character.rarity);
         const moveMultiplier = calcMoveMultiplier(move.type);
-        const winRate = getCharacterWinRate(player.character.rarity);
-        const isSuccessHit = Math.random() < winRate;
+        const turnLossChance = getTurnLossChance(player, session.boss);
+        const isSuccessHit = Math.random() >= turnLossChance;
 
         let damage = Math.round(move.baseDamage * moveMultiplier * power * elementMultiplier * reaction.multiplier * variance);
         if (isSuccessHit) {
-          damage = Math.round(damage * 1.25);
+          damage = Math.round(damage * 1.15);
+        } else {
+          damage = Math.round(damage * 0.45);
         }
 
         if (move.type === "guard") {
@@ -791,6 +835,10 @@ async function startElementalClashSession({
 
         let counterDamage = Math.round((36 + round * 10) * (move.type === "burst" ? 1.12 : move.type === "guard" ? 0.4 : 1));
         counterDamage = Math.max(12, counterDamage - player.shield);
+
+        if (!isSuccessHit) {
+          counterDamage = Math.round(counterDamage * 1.2);
+        }
 
         if (move.type === "skill") {
           player.shield = Math.min(45, player.shield + 20);
