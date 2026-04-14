@@ -34,6 +34,7 @@ const LEVEL_UP_REWARD_PRIMOS = Number.parseInt(process.env.LEVEL_UP_REWARD_PRIMO
 const GENSHIN_API_BASE = "https://genshin.jmp.blue";
 const WISH_ANIMATION_WAIT_MS = Number.parseInt(process.env.WISH_ANIMATION_WAIT_MS || "7000", 10);
 const TRADE_OFFER_TIMEOUT_MS = 10 * 60 * 1000;
+const BANNER_VOTE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const PORT = Number.parseInt(process.env.PORT || "0", 10);
 const ROOT_DIR = path.resolve(__dirname, "..");
 const WISH_GIF_FILES = {
@@ -311,6 +312,13 @@ function wait(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, Math.max(0, ms));
   });
+}
+
+function formatRemainingDuration(ms) {
+  const totalMinutes = Math.max(0, Math.ceil(ms / 60000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${hours}h ${minutes}m`;
 }
 
 function flipCoin() {
@@ -944,43 +952,33 @@ client.on("messageCreate", async (message) => {
     const helpEmbed = new EmbedBuilder()
       .setTitle(`${EMOJI.shenheSmile} Genshin Wish Bot Commands`)
       .setColor(0xe6b8ff)
-      .addFields(
-        {
-          name: `${EMOJI.primogem} Wishing Commands`,
-          value: formatAestheticBlock([
-            `${PREFIX}banner - show active banner & featured characters`,
-            `${PREFIX}vote <character> - vote for next banner's featured 5★`,
-            `${PREFIX}wish [1|10] - spend primogems to wish`,
-            `${PREFIX}characters - show your owned character roster (with sorting & pagination)`,
-            `${PREFIX}profile - show your primogems, pity, level & inventory`
-          ]),
-          inline: false
-        },
-        {
-          name: `${EMOJI.laylaConfident} Mini-Games & Events`,
-          value: formatAestheticBlock([
-            `${PREFIX}trivia - get trivia question for primogem rewards`,
-            `${PREFIX}answer <text> - answer active trivia questions`,
-            `${PREFIX}clash - start Elemental Clash raid (5 rounds, 2-4 players, WIN = 5000+ primos!)`
-          ]),
-          inline: false
-        },
-        {
-          name: `${EMOJI.shenheTea} Gambling & Trading`,
-          value: formatAestheticBlock([
-            `${PREFIX}coinflip <heads|tails> <bet> - 50/50 gamble for primogems`,
-            `${PREFIX}trade @user - trade characters (both players lock & confirm)`
-          ]),
-          inline: false
-        },
-        {
-          name: `${EMOJI.shenheSmile} Utility`,
-          value: formatAestheticBlock([
-            `${PREFIX}primogems - check your current primogem balance`,
-            `Chat Rewards: Every message 8+ chars earns ${ACTIVITY_REWARD_PRIMOS} primos every ${Math.floor(ACTIVITY_COOLDOWN_MS / 60000)} min`
-          ]),
-          inline: false
-        }
+      .setDescription(
+        [
+          "━━━━━━━━━━━━━━━━━━━",
+          `${EMOJI.primogem} **Wishing**`,
+          `${AESTHETIC_EMOJIS[0]} \`${PREFIX}banner\` — Show active banner & featured characters`,
+          `${AESTHETIC_EMOJIS[1]} \`${PREFIX}vote\` — Vote for next banner's featured 5★ (UI + 24h cooldown)`,
+          `${AESTHETIC_EMOJIS[2]} \`${PREFIX}wish [1|10]\` — Spend primogems to wish`,
+          `${AESTHETIC_EMOJIS[3]} \`${PREFIX}characters\` — View your character roster (sorting & pagination)`,
+          `${AESTHETIC_EMOJIS[4]} \`${PREFIX}profile\` — Check primogems, pity, level & inventory`,
+          "",
+          "━━━━━━━━━━━━━━━━━━━",
+          `${EMOJI.laylaConfident} **Mini-Games & Events**`,
+          `${AESTHETIC_EMOJIS[0]} \`${PREFIX}trivia\` — Get a trivia question for primogem rewards`,
+          `${AESTHETIC_EMOJIS[1]} \`${PREFIX}answer <text>\` — Answer active trivia`,
+          `${AESTHETIC_EMOJIS[2]} \`${PREFIX}clash\` — Elemental Clash raid (2-4 players, 5 rounds, win 5000+ primos)`,
+          "",
+          "━━━━━━━━━━━━━━━━━━━",
+          `${EMOJI.shenheTea} **Gambling & Trading**`,
+          `${AESTHETIC_EMOJIS[0]} \`${PREFIX}coinflip <heads|tails> <bet>\` — 50/50 primogem gamble`,
+          `${AESTHETIC_EMOJIS[1]} \`${PREFIX}trade @user\` — Trade characters (lock & confirm system)`,
+          "",
+          "━━━━━━━━━━━━━━━━━━━",
+          `${EMOJI.shenheSmile} **Utility**`,
+          `${AESTHETIC_EMOJIS[0]} \`${PREFIX}primogems\` — Check your primogem balance`,
+          `${AESTHETIC_EMOJIS[1]} **Chat Rewards** — Send messages (8+ chars) to earn ${ACTIVITY_REWARD_PRIMOS} primos every ${Math.floor(ACTIVITY_COOLDOWN_MS / 60000)} minutes`,
+          "━━━━━━━━━━━━━━━━━━━"
+        ].join("\n")
       );
 
     await message.reply({ embeds: [helpEmbed] });
@@ -1007,45 +1005,162 @@ client.on("messageCreate", async (message) => {
   }
 
   if (cmd === "vote") {
-    const characterName = args.join(" ").trim();
-
-    if (!characterName) {
-      const availableChars = CHARACTERS.fiveStarFeatured.slice(0, 10).join(", ");
-      await message.reply(`${EMOJI.laylaHesitant} Usage: ${PREFIX}vote <character name>\n\nAvailable characters: ${availableChars}... and more`);
+    const now = Date.now();
+    const elapsed = now - (profile.lastBannerVoteAt || 0);
+    if (elapsed < BANNER_VOTE_COOLDOWN_MS) {
+      const remaining = BANNER_VOTE_COOLDOWN_MS - elapsed;
+      await message.reply(
+        `${EMOJI.laylaHesitant} You can vote once every 24 hours. Try again in **${formatRemainingDuration(remaining)}**.`
+      );
       return;
     }
 
-    const matchedCharacter = CHARACTERS.fiveStarFeatured.find((char) => normalize(char) === normalize(characterName));
+    const voteOptions = [...CHARACTERS.fiveStarFeatured]
+      .sort((a, b) => a.localeCompare(b))
+      .map((name) => ({
+        label: name,
+        value: name,
+        description: `${name} featured vote`
+      }));
 
-    if (!matchedCharacter) {
-      await message.reply(`${EMOJI.laylaHesitant} Character not found. Use ${PREFIX}vote <name> with a valid 5-star character.`);
-      return;
-    }
+    let selectedCharacter = null;
+    const voteIdPrefix = `vote_${message.id}`;
 
-    try {
-      await saveBannerVote(matchedCharacter);
-      const votes = await getBannerVotes();
-      const totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
-      const charVotes = votes[matchedCharacter] || 0;
-      const percentage = totalVotes > 0 ? Math.round((charVotes / totalVotes) * 100) : 0;
+    const selectRows = chunkArray(voteOptions, 25).map((chunk, index) => (
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId(`${voteIdPrefix}_pick_${index}`)
+          .setPlaceholder(index === 0 ? "Pick a featured 5-star character" : "More featured 5-star options")
+          .setMinValues(1)
+          .setMaxValues(1)
+          .addOptions(chunk)
+      )
+    ));
 
-      const voteEmbed = new EmbedBuilder()
-        .setTitle(`${EMOJI.shenheSmile} Vote Recorded`)
-        .setColor(0x9b59b6)
-        .setDescription(
-          formatAestheticBlock([
-            `Character: **${matchedCharacter}**`,
-            `Your vote counted!`,
-            `Current votes: **${charVotes}** (${percentage}% of ${totalVotes} total)`,
-            `Votes are reset weekly for the next banner.`
-          ])
-        );
+    const buttonRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`${voteIdPrefix}_confirm`)
+        .setLabel("Confirm Vote")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`${voteIdPrefix}_cancel`)
+        .setLabel("Cancel")
+        .setStyle(ButtonStyle.Secondary)
+    );
 
-      await message.reply({ embeds: [voteEmbed] });
-    } catch (error) {
-      console.error("Vote error:", error);
-      await message.reply(`${EMOJI.laylaSad} Error saving vote. Please try again.`);
-    }
+    const buildVoteEmbed = () => new EmbedBuilder()
+      .setTitle(`${EMOJI.shenheSmile} Banner Vote`)
+      .setColor(0x9b59b6)
+      .setDescription(
+        formatAestheticBlock([
+          "Choose one featured 5-star from the dropdown.",
+          `Selected: **${selectedCharacter || "None"}**`,
+          "Press Confirm Vote to submit.",
+          "You can vote once every 24 hours."
+        ])
+      );
+
+    const voteMessage = await message.reply({
+      embeds: [buildVoteEmbed()],
+      components: [...selectRows, buttonRow]
+    });
+
+    const collector = voteMessage.createMessageComponentCollector({ time: 5 * 60 * 1000 });
+
+    collector.on("collect", async (interaction) => {
+      if (!interaction.customId.startsWith(voteIdPrefix)) return;
+
+      if (interaction.user.id !== message.author.id) {
+        await interaction.reply({
+          content: `${EMOJI.laylaHesitant} This voting panel belongs to ${message.author.username}.`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      if (interaction.customId.includes("_pick_")) {
+        selectedCharacter = interaction.values[0];
+        await interaction.update({
+          embeds: [buildVoteEmbed()],
+          components: [...selectRows, buttonRow]
+        });
+        return;
+      }
+
+      if (interaction.customId.endsWith("_cancel")) {
+        await interaction.update({
+          embeds: [new EmbedBuilder().setColor(0x95a5a6).setDescription(`${EMOJI.laylaSad} Vote cancelled.`)],
+          components: []
+        });
+        collector.stop("cancelled");
+        return;
+      }
+
+      if (interaction.customId.endsWith("_confirm")) {
+        if (!selectedCharacter) {
+          await interaction.reply({
+            content: `${EMOJI.laylaHesitant} Pick a character first before confirming.`,
+            ephemeral: true
+          });
+          return;
+        }
+
+        const freshProfile = await loadUserProfile(message.author.id);
+        const freshNow = Date.now();
+        const freshElapsed = freshNow - (freshProfile.lastBannerVoteAt || 0);
+        if (freshElapsed < BANNER_VOTE_COOLDOWN_MS) {
+          const remaining = BANNER_VOTE_COOLDOWN_MS - freshElapsed;
+          await interaction.reply({
+            content: `${EMOJI.laylaHesitant} You can vote again in **${formatRemainingDuration(remaining)}**.`,
+            ephemeral: true
+          });
+          return;
+        }
+
+        try {
+          await saveBannerVote(selectedCharacter);
+          freshProfile.lastBannerVoteAt = freshNow;
+          await saveUserProfile(message.author.id, freshProfile);
+
+          const votes = await getBannerVotes();
+          const totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
+          const charVotes = votes[selectedCharacter] || 0;
+          const percentage = totalVotes > 0 ? Math.round((charVotes / totalVotes) * 100) : 0;
+
+          const voteEmbed = new EmbedBuilder()
+            .setTitle(`${EMOJI.shenheSmile} Vote Recorded`)
+            .setColor(0x9b59b6)
+            .setDescription(
+              formatAestheticBlock([
+                `Character: **${selectedCharacter}**`,
+                "Your vote counted successfully.",
+                `Current votes: **${charVotes}** (${percentage}% of ${totalVotes} total)`,
+                "You can vote again after 24 hours."
+              ])
+            );
+
+          await interaction.update({ embeds: [voteEmbed], components: [] });
+          collector.stop("confirmed");
+        } catch (error) {
+          console.error("Vote error:", error);
+          await interaction.reply({
+            content: `${EMOJI.laylaSad} Error saving vote. Please try again.`,
+            ephemeral: true
+          });
+        }
+      }
+    });
+
+    collector.on("end", async () => {
+      if (voteMessage.editable) {
+        try {
+          await voteMessage.edit({ components: [] });
+        } catch {
+          // Ignore when message is deleted or no longer editable.
+        }
+      }
+    });
+
     return;
   }
 

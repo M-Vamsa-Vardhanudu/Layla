@@ -19,7 +19,8 @@ const userProfileSchema = new mongoose.Schema(
     },
     activeTrivia: { type: Object, default: null },
     lastTriviaAt: { type: Number, default: 0 },
-    lastActivityAt: { type: Number, default: 0 }
+    lastActivityAt: { type: Number, default: 0 },
+    lastBannerVoteAt: { type: Number, default: 0 }
   },
   { collection: "users", timestamps: true }
 );
@@ -101,7 +102,8 @@ function getDefaultProfile() {
     },
     activeTrivia: null,
     lastTriviaAt: 0,
-    lastActivityAt: 0
+    lastActivityAt: 0,
+    lastBannerVoteAt: 0
   };
 }
 
@@ -126,6 +128,7 @@ function hydrateProfile(profile) {
   profile.activeTrivia ??= defaults.activeTrivia;
   profile.lastTriviaAt ??= defaults.lastTriviaAt;
   profile.lastActivityAt ??= defaults.lastActivityAt;
+  profile.lastBannerVoteAt ??= defaults.lastBannerVoteAt;
 
   profile.inventory ??= defaults.inventory;
   profile.inventory.fiveStar = normalizeInventoryBucket(profile.inventory.fiveStar);
