@@ -17,6 +17,7 @@ const MAX_PLAYERS = 4;
 const LOBBY_TIMEOUT_MS = 45 * 1000;
 const ROUND_COUNT = 5;
 const TURN_ACTION_TIMEOUT_MS = 25 * 1000;
+const CLASH_ENTRY_FEE = 500;
 const BOSS_ART_FILE = path.resolve(__dirname, "..", "..", "311882f16264d6498dcf1ae277b9e031_3641850878197328239.webp");
 
 const activeClashByChannel = new Map();
@@ -95,7 +96,7 @@ function getOwnedCharacterEntries(profile) {
 
   return entries.sort((left, right) => {
     const rarityRank = (value) => (value === "fiveStar" ? 2 : 1);
-    return right.count - left.count || rarityRank(right.rarity) - rarityRank(left.rarity) || left.name.localeCompare(right.name);
+    return rarityRank(right.rarity) - rarityRank(left.rarity) || left.name.localeCompare(right.name) || right.count - left.count;
   });
 }
 
@@ -198,7 +199,7 @@ function chooseBoss() {
     resistance,
     weakElements,
     aura,
-    maxHp: 2200 + Math.floor(Math.random() * 350)
+    maxHp: 2600 + Math.floor(Math.random() * 450)
   };
 }
 
@@ -228,9 +229,61 @@ function formatPlayerLabel(player) {
 
 function bossElementMultiplier(element, boss) {
   const upper = String(element || "").toUpperCase();
-  if (upper === boss.resistance) return 0.72;
-  if (boss.weakElements.includes(upper)) return 1.38;
+  if (upper === boss.resistance) return 0.6;
+  if (boss.weakElements.includes(upper)) return 1.22;
   return 1.0;
+}
+
+function getPartyMatchupSummary(players, boss) {
+  const summary = {
+    resistedCount: 0,
+    strongCount: 0,
+    neutralCount: 0,
+    fiveStarCount: 0
+  };
+
+  for (const player of players) {
+    if (player.character?.rarity === "fiveStar") {
+      summary.fiveStarCount += 1;
+    }
+
+    const matchup = getElementMatchupType(player.element, boss);
+    if (matchup === "resisted") {
+      summary.resistedCount += 1;
+    } else if (matchup === "strong") {
+      summary.strongCount += 1;
+    } else {
+      summary.neutralCount += 1;
+    }
+  }
+
+  return summary;
+}
+
+function scaleBossHpForParty(baseHp, players, boss) {
+  const summary = getPartyMatchupSummary(players, boss);
+  let hpScale = 1;
+
+  hpScale += summary.fiveStarCount * 0.06;
+
+  if (summary.neutralCount === players.length) {
+    hpScale += 0.02;
+  }
+
+  if (summary.resistedCount === 1) {
+    hpScale += 0.14;
+  } else if (summary.resistedCount >= 2) {
+    hpScale += 0.32;
+  }
+
+  if (summary.strongCount === 1) {
+    hpScale -= 0.1;
+  } else if (summary.strongCount >= 2) {
+    hpScale -= 0.18;
+  }
+
+  const scaled = Math.round(baseHp * Math.max(0.82, hpScale));
+  return Math.max(2200, scaled);
 }
 
 function buildBattleCardSvg({ boss, hpRemaining, round, totalRounds, fieldAura, players, combatLog }) {
@@ -378,6 +431,7 @@ function buildLobbyEmbed(session, emoji) {
     .setDescription(
       [
         "Join the raid, choose your character from your dropdown, then start.",
+        `Entry fee: **${CLASH_ENTRY_FEE}** primogems (charged when battle starts).`,
         "",
         `Players: **${session.players.length}/${MAX_PLAYERS}**`,
         `Need at least **${MIN_PLAYERS}** players to start.`,
@@ -468,11 +522,33 @@ function getElementMatchupType(element, boss) {
 
 function getTurnLossChance(player, boss) {
   const matchup = getElementMatchupType(player.element, boss);
-  const baseLossChance = matchup === "resisted" ? 0.75 : matchup === "strong" ? 0.2 : 0.25;
-  const rarityAdjustment = player.character.rarity === "fiveStar" ? -0.03 : 0.03;
-  const randomSwing = (0.05 + Math.random() * 0.1) * (Math.random() < 0.5 ? -1 : 1);
-  const chance = baseLossChance + rarityAdjustment + randomSwing;
+  const baseLossChance = matchup === "resisted" ? 0.62 : matchup === "strong" ? 0.18 : 0.28;
+  const randomSwing = (0.03 + Math.random() * 0.06) * (Math.random() < 0.5 ? -1 : 1);
+  const chance = baseLossChance + randomSwing;
   return Math.max(0.05, Math.min(0.95, chance));
+}
+
+async function collectEntryFees(session, saveUserProfile, loadUsers, getProfile) {
+  const users = await loadUsers();
+  const remainingPlayers = [];
+  const removedPlayers = [];
+
+  for (const player of session.players) {
+    const profile = await getProfile(users, player.userId);
+    if ((profile.primogems || 0) < CLASH_ENTRY_FEE) {
+      removedPlayers.push(player.displayName);
+      continue;
+    }
+
+    profile.primogems -= CLASH_ENTRY_FEE;
+    await saveUserProfile(player.userId, profile);
+
+    player.profile = profile;
+    remainingPlayers.push(player);
+  }
+
+  session.players = remainingPlayers;
+  return { removedPlayers };
 }
 
 function calcMoveMultiplier(moveType) {
@@ -536,6 +612,11 @@ async function startElementalClashSession({
     return;
   }
 
+  if ((profile.primogems || 0) < CLASH_ENTRY_FEE) {
+    await message.reply(`${emoji.laylaHesitant} You need at least ${CLASH_ENTRY_FEE} primogems to open Elemental Clash.`);
+    return;
+  }
+
   const session = {
     channelId: message.channel.id,
     initiatorId: message.author.id,
@@ -548,6 +629,7 @@ async function startElementalClashSession({
     lobbyMessage: null,
     collector: null,
     battleStarted: false,
+    entryFeeCollected: false,
     timeoutId: null,
     customIdPrefix: `clash_${message.id}`
   };
@@ -652,8 +734,24 @@ async function startElementalClashSession({
 
   const startBattle = async () => {
     session.battleStarted = true;
+
+    if (!session.entryFeeCollected) {
+      const feeResult = await collectEntryFees(session, saveUserProfile, loadUsers, getProfile);
+      session.entryFeeCollected = true;
+
+      if (feeResult.removedPlayers.length) {
+        await message.channel.send(`${emoji.laylaHesitant} Removed for insufficient primogems (${CLASH_ENTRY_FEE} needed): ${feeResult.removedPlayers.join(", ")}`);
+      }
+
+      if (session.players.length < MIN_PLAYERS) {
+        await message.channel.send(`${emoji.laylaSad} Elemental Clash cancelled. Not enough paid players to begin.`);
+        await cleanup();
+        return;
+      }
+    }
+
     session.boss = chooseBoss();
-    session.bossHp = session.boss.maxHp;
+    session.bossHp = scaleBossHpForParty(session.boss.maxHp, session.players, session.boss);
 
     try {
       await lobbyMessage.edit({
@@ -670,39 +768,6 @@ async function startElementalClashSession({
 
     const battleMessage = lobbyMessage;
     const totalRounds = ROUND_COUNT;
-
-    const alivePlayers = session.players.filter((player) => player.active);
-    const allResisted = alivePlayers.length > 0 && alivePlayers.every((player) => getElementMatchupType(player.element, session.boss) === "resisted");
-
-    if (allResisted) {
-      session.round = 1;
-      session.combatLog.push("All selected elements are resisted by the boss.");
-      session.combatLog.push("Element mismatch forced an immediate defeat.");
-
-      const rewardLineImmediate = await grantRewards(session, saveUserProfile, loadUsers, getProfile, emoji, false);
-      const finalBufferImmediate = await renderBossCardBuffer({
-        boss: session.boss,
-        hpRemaining: Math.max(0, session.bossHp),
-        round: session.round,
-        totalRounds: ROUND_COUNT,
-        fieldAura: session.boss.aura,
-        players: session.players,
-        combatLog: session.combatLog
-      });
-
-      const finalFileImmediate = new AttachmentBuilder(finalBufferImmediate, { name: "clash-final.webp" });
-      const finalOutcomeImmediate = `${emoji.laylaSad} All party elements were resisted by ${session.boss.name}, so the raid failed immediately.\n${rewardLineImmediate}`;
-      const finalEmbedImmediate = buildFinalEmbed(session, emoji, finalOutcomeImmediate);
-
-      await battleMessage.edit({
-        embeds: [finalEmbedImmediate],
-        files: [finalFileImmediate],
-        components: []
-      });
-
-      await cleanup();
-      return;
-    }
 
     for (let round = 1; round <= totalRounds; round += 1) {
       session.round = round;
@@ -1013,6 +1078,11 @@ ${rewardLine}`;
 
       if (!isPlayerReady(currentProfile)) {
         await interaction.reply({ content: `${emoji.laylaHesitant} You need at least one character to join.`, ephemeral: true });
+        return;
+      }
+
+      if ((currentProfile.primogems || 0) < CLASH_ENTRY_FEE) {
+        await interaction.reply({ content: `${emoji.laylaHesitant} You need at least ${CLASH_ENTRY_FEE} primogems to enter Elemental Clash.`, ephemeral: true });
         return;
       }
 
