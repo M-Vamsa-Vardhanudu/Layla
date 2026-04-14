@@ -53,7 +53,8 @@ const STANDARD_FIVE_STARS = [
   "Diluc",
   "Keqing",
   "Mona",
-  "Tighnari"
+  "Tighnari",
+  "Dehya"
 ];
 
 const CHARACTERS = {
