@@ -16,10 +16,10 @@ const {
   ButtonStyle,
   ComponentType
 } = require("discord.js");
-const { getTodayBanner, CHARACTERS, CHARACTER_ELEMENTS } = require("./data/banners");
+const { getTodayBanner, CHARACTERS, CHARACTER_ELEMENTS, getVotedBanner } = require("./data/banners");
 const { getRandomTrivia } = require("./data/trivia");
 const { startElementalClashSession } = require("./data/elementalClash");
-const { loadUsers, saveUsers, getProfile, loadUserProfile, saveUserProfile, connectDatabase } = require("./storage");
+const { loadUsers, saveUsers, getProfile, loadUserProfile, saveUserProfile, connectDatabase, saveBannerVote, getBannerVotes, getBannerHistory } = require("./storage");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const PREFIX = process.env.PREFIX || "!";
@@ -944,20 +944,43 @@ client.on("messageCreate", async (message) => {
     const helpEmbed = new EmbedBuilder()
       .setTitle(`${EMOJI.shenheSmile} Genshin Wish Bot Commands`)
       .setColor(0xe6b8ff)
-      .setDescription(
-        formatAestheticBlock([
-          `${PREFIX}banner - show active banner`,
-          `${PREFIX}wish [1|10] - spend primogems to wish`,
-          `${PREFIX}trivia - get a dropdown trivia question for primogems`,
-          `${PREFIX}answer <text> - optional text fallback for active trivia`,
-          `${PREFIX}clash - start an Elemental Clash raid with other players`,
-          `${PREFIX}coinflip <heads|tails> <bet> - gamble primogems for a 50/50 payout`,
-          `${PREFIX}trade @user - open a dropdown trade UI (both users lock in, then both press confirm)`,
-          `${PREFIX}characters - show your owned character roster`,
-          `${PREFIX}primogems - show your current primogems`,
-          `${PREFIX}profile - show your primogems, pity, and inventory`,
-          `Passive rewards: chat messages (>=${ACTIVITY_MIN_MESSAGE_LEN} chars) earn ${ACTIVITY_REWARD_PRIMOS} primogems every ${Math.floor(ACTIVITY_COOLDOWN_MS / 60000)} min`
-        ])
+      .addFields(
+        {
+          name: `${EMOJI.primogem} Wishing Commands`,
+          value: formatAestheticBlock([
+            `${PREFIX}banner - show active banner & featured characters`,
+            `${PREFIX}vote <character> - vote for next banner's featured 5★`,
+            `${PREFIX}wish [1|10] - spend primogems to wish`,
+            `${PREFIX}characters - show your owned character roster (with sorting & pagination)`,
+            `${PREFIX}profile - show your primogems, pity, level & inventory`
+          ]),
+          inline: false
+        },
+        {
+          name: `${EMOJI.laylaConfident} Mini-Games & Events`,
+          value: formatAestheticBlock([
+            `${PREFIX}trivia - get trivia question for primogem rewards`,
+            `${PREFIX}answer <text> - answer active trivia questions`,
+            `${PREFIX}clash - start Elemental Clash raid (5 rounds, 2-4 players, WIN = 5000+ primos!)`
+          ]),
+          inline: false
+        },
+        {
+          name: `${EMOJI.shenheTea} Gambling & Trading`,
+          value: formatAestheticBlock([
+            `${PREFIX}coinflip <heads|tails> <bet> - 50/50 gamble for primogems`,
+            `${PREFIX}trade @user - trade characters (both players lock & confirm)`
+          ]),
+          inline: false
+        },
+        {
+          name: `${EMOJI.shenheSmile} Utility`,
+          value: formatAestheticBlock([
+            `${PREFIX}primogems - check your current primogem balance`,
+            `Chat Rewards: Every message 8+ chars earns ${ACTIVITY_REWARD_PRIMOS} primos every ${Math.floor(ACTIVITY_COOLDOWN_MS / 60000)} min`
+          ]),
+          inline: false
+        }
       );
 
     await message.reply({ embeds: [helpEmbed] });
@@ -980,6 +1003,49 @@ client.on("messageCreate", async (message) => {
       .setImage(characterCardUrl(banner.featuredFiveStar));
 
     await message.reply({ embeds: [embed] });
+    return;
+  }
+
+  if (cmd === "vote") {
+    const characterName = args.join(" ").trim();
+
+    if (!characterName) {
+      const availableChars = CHARACTERS.fiveStarFeatured.slice(0, 10).join(", ");
+      await message.reply(`${EMOJI.laylaHesitant} Usage: ${PREFIX}vote <character name>\n\nAvailable characters: ${availableChars}... and more`);
+      return;
+    }
+
+    const matchedCharacter = CHARACTERS.fiveStarFeatured.find((char) => normalize(char) === normalize(characterName));
+
+    if (!matchedCharacter) {
+      await message.reply(`${EMOJI.laylaHesitant} Character not found. Use ${PREFIX}vote <name> with a valid 5-star character.`);
+      return;
+    }
+
+    try {
+      await saveBannerVote(matchedCharacter);
+      const votes = await getBannerVotes();
+      const totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
+      const charVotes = votes[matchedCharacter] || 0;
+      const percentage = totalVotes > 0 ? Math.round((charVotes / totalVotes) * 100) : 0;
+
+      const voteEmbed = new EmbedBuilder()
+        .setTitle(`${EMOJI.shenheSmile} Vote Recorded`)
+        .setColor(0x9b59b6)
+        .setDescription(
+          formatAestheticBlock([
+            `Character: **${matchedCharacter}**`,
+            `Your vote counted!`,
+            `Current votes: **${charVotes}** (${percentage}% of ${totalVotes} total)`,
+            `Votes are reset weekly for the next banner.`
+          ])
+        );
+
+      await message.reply({ embeds: [voteEmbed] });
+    } catch (error) {
+      console.error("Vote error:", error);
+      await message.reply(`${EMOJI.laylaSad} Error saving vote. Please try again.`);
+    }
     return;
   }
 
@@ -1830,8 +1896,8 @@ client.on("messageCreate", async (message) => {
   }
 
   if (cmd === "characters" || cmd === "roster") {
-    const fiveStarRoster = formatRosterEntries(profile.inventory.fiveStar);
-    const fourStarRoster = formatRosterEntries(profile.inventory.fourStar);
+    const fiveStarRoster = formatRosterEntries(profile.inventory.fiveStar, 9999);
+    const fourStarRoster = formatRosterEntries(profile.inventory.fourStar, 9999);
     const hasCharacters = fiveStarRoster.unique > 0 || fourStarRoster.unique > 0;
 
     if (!hasCharacters) {
@@ -1839,54 +1905,216 @@ client.on("messageCreate", async (message) => {
       return;
     }
 
-    const embed = new EmbedBuilder()
+    const rosterIdPrefix = `roster_${message.id}`;
+    let currentSort = "dupes";
+    let currentPage = 0;
+
+    const buildRosterPages = (sort) => {
+      let five5Entries = Object.entries(profile.inventory.fiveStar).filter(([, count]) => count > 0);
+      let five4Entries = Object.entries(profile.inventory.fourStar).filter(([, count]) => count > 0);
+
+      if (sort === "element") {
+        five5Entries = five5Entries.sort(([a], [b]) => {
+          const elemA = CHARACTER_ELEMENTS[a] || "";
+          const elemB = CHARACTER_ELEMENTS[b] || "";
+          return elemA.localeCompare(elemB) || a.localeCompare(b);
+        });
+        five4Entries = five4Entries.sort(([a], [b]) => {
+          const elemA = CHARACTER_ELEMENTS[a] || "";
+          const elemB = CHARACTER_ELEMENTS[b] || "";
+          return elemA.localeCompare(elemB) || a.localeCompare(b);
+        });
+      } else if (sort === "name") {
+        five5Entries = five5Entries.sort(([a], [b]) => a.localeCompare(b));
+        five4Entries = five4Entries.sort(([a], [b]) => a.localeCompare(b));
+      } else if (sort === "dupes") {
+        five5Entries = five5Entries.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+        five4Entries = five4Entries.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      }
+
+      const allEntries = [...five5Entries, ...five4Entries];
+      const pageSize = 10;
+      const pages = [];
+
+      for (let i = 0; i < allEntries.length; i += pageSize) {
+        pages.push(allEntries.slice(i, i + pageSize));
+      }
+
+      return pages.length > 0 ? pages : [[]];
+    };
+
+    const buildRosterEmbed = (page, pageNum, totalPages, sort) => {
+      const lines = page.map(([name, count]) => {
+        const elementKey = CHARACTER_ELEMENTS[name] || "";
+        const elementEmoji = elementEmojiForKey(elementKey);
+        const constellation = Math.max(0, count - 1);
+        const rarity = profile.inventory.fiveStar[name] ? "5★" : "4★";
+        const constellationText = constellation > 0 ? ` (C${constellation})` : "";
+        return `• ${rarity} ${elementEmoji ? `${elementEmoji} ` : ""}**${name}** x${count}${constellationText}`;
+      });
+
+      return new EmbedBuilder()
+        .setTitle(`${EMOJI.shenheSmile} Character Roster - Page ${pageNum + 1}/${totalPages}`)
+        .setDescription(lines.length > 0 ? lines.join("\n") : "No characters on this page")
+        .setFooter({ text: `Sorted by: ${sort} | Total unique: ${fiveStarRoster.unique + fourStarRoster.unique}` })
+        .setColor(0x1abc9c);
+    };
+
+    const buildSortAndPaginationRows = (currentPages, currentPageNum, sort) => {
+      const sortOptions = [
+        { label: "By Duplication", value: "dupes", emoji: "📦" },
+        { label: "By Rarity", value: "rarity", emoji: "⭐" },
+        { label: "By Element", value: "element", emoji: "🌀" },
+        { label: "By Name (A-Z)", value: "name", emoji: "🔤" }
+      ];
+
+      const rows = [
+        new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId(`${rosterIdPrefix}_sort`)
+            .setPlaceholder(`Current sort: ${sortOptions.find((o) => o.value === sort)?.label || "Duplication"}`)
+            .addOptions(sortOptions.map((opt) => ({
+              label: opt.label,
+              value: opt.value,
+              default: opt.value === sort
+            })))
+        )
+      ];
+
+      if (currentPages.length > 1) {
+        rows.push(
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`${rosterIdPrefix}_prev`)
+              .setLabel("⬅ Previous")
+              .setStyle(ButtonStyle.Primary)
+              .setDisabled(currentPageNum === 0),
+            new ButtonBuilder()
+              .setCustomId(`${rosterIdPrefix}_next`)
+              .setLabel("Next ➡")
+              .setStyle(ButtonStyle.Primary)
+              .setDisabled(currentPageNum + 1 >= currentPages.length),
+            new ButtonBuilder()
+              .setCustomId(`${rosterIdPrefix}_gallery`)
+              .setLabel("📸 5-Star Gallery")
+              .setStyle(ButtonStyle.Secondary)
+          )
+        );
+      }
+
+      return rows;
+    };
+
+    const summaryEmbed = new EmbedBuilder()
       .setTitle(`${message.author.username}'s Character Roster`)
       .setDescription(
         [
           `Unique characters: ${fiveStarRoster.unique + fourStarRoster.unique}`,
           `Total character pulls: ${fiveStarRoster.total + fourStarRoster.total}`,
+          `5★: ${fiveStarRoster.unique} | 4★: ${fourStarRoster.unique}`,
           "Constellation shown as C(count - 1)."
         ].join("\n")
       )
-      .setColor(0x1abc9c)
-      .addFields(
-        {
-          name: `5★ Characters (${fiveStarRoster.unique})`,
-          value: fiveStarRoster.lines.length ? fiveStarRoster.lines.join("\n") : "None yet",
-          inline: false
-        },
-        {
-          name: `4★ Characters (${fourStarRoster.unique})`,
-          value: fourStarRoster.lines.length ? fourStarRoster.lines.join("\n") : "None yet",
-          inline: false
-        }
-      );
+      .setColor(0x1abc9c);
 
-    await message.reply({ embeds: [embed] });
+    await message.reply({ embeds: [summaryEmbed] });
 
-    const ownedFiveStarEntries = Object.entries(profile.inventory.fiveStar)
-      .filter(([, count]) => count > 0)
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    let pages = buildRosterPages(currentSort);
+    let rosterMessage = await message.channel.send({
+      embeds: [buildRosterEmbed(pages[currentPage], currentPage, pages.length, currentSort)],
+      components: buildSortAndPaginationRows(pages, currentPage, currentSort)
+    });
 
-    if (ownedFiveStarEntries.length > 0) {
-      const pages = chunkArray(ownedFiveStarEntries, 3);
+    const collector = rosterMessage.createMessageComponentCollector({ time: 15 * 60 * 1000 });
 
-      for (let index = 0; index < pages.length; index += 1) {
-        const page = pages[index];
-        const names = page.map(([name]) => name);
-        const collageBuffer = await buildFiveStarCollage(names);
-        const fileName = `five-star-gallery-${index + 1}.png`;
-        const attachment = new AttachmentBuilder(collageBuffer, { name: fileName });
+    collector.on("collect", async (interaction) => {
+      if (!interaction.customId.startsWith(rosterIdPrefix)) return;
 
-        const embedPage = new EmbedBuilder()
-          .setTitle(`${EMOJI.shenheGroove} 5★ Gallery ${index + 1}/${pages.length}`)
-          .setDescription(page.map(([name, count]) => `**${name}** x${count}`).join(" • "))
-          .setColor(0xf39c12)
-          .setImage(`attachment://${fileName}`);
-
-        await message.channel.send({ embeds: [embedPage], files: [attachment] });
+      if (interaction.user.id !== message.author.id) {
+        await interaction.reply({
+          content: `${EMOJI.laylaHesitant} This roster belongs to ${message.author.username}.`,
+          ephemeral: true
+        });
+        return;
       }
-    }
+
+      if (interaction.customId.endsWith("_sort")) {
+        currentSort = interaction.values[0];
+        pages = buildRosterPages(currentSort);
+        currentPage = 0;
+        await interaction.update({
+          embeds: [buildRosterEmbed(pages[currentPage], currentPage, pages.length, currentSort)],
+          components: buildSortAndPaginationRows(pages, currentPage, currentSort)
+        });
+        return;
+      }
+
+      if (interaction.customId.endsWith("_prev")) {
+        if (currentPage > 0) currentPage -= 1;
+        await interaction.update({
+          embeds: [buildRosterEmbed(pages[currentPage], currentPage, pages.length, currentSort)],
+          components: buildSortAndPaginationRows(pages, currentPage, currentSort)
+        });
+        return;
+      }
+
+      if (interaction.customId.endsWith("_next")) {
+        if (currentPage + 1 < pages.length) currentPage += 1;
+        await interaction.update({
+          embeds: [buildRosterEmbed(pages[currentPage], currentPage, pages.length, currentSort)],
+          components: buildSortAndPaginationRows(pages, currentPage, currentSort)
+        });
+        return;
+      }
+
+      if (interaction.customId.endsWith("_gallery")) {
+        await interaction.deferReply();
+        const ownedFiveStarEntries = Object.entries(profile.inventory.fiveStar)
+          .filter(([, count]) => count > 0)
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+
+        if (ownedFiveStarEntries.length > 0) {
+          const galleryPages = chunkArray(ownedFiveStarEntries, 3);
+
+          for (let index = 0; index < galleryPages.length; index += 1) {
+            const page = galleryPages[index];
+            const names = page.map(([name]) => name);
+            const collageBuffer = await buildFiveStarCollage(names);
+            const fileName = `five-star-gallery-${index + 1}.png`;
+            const attachment = new AttachmentBuilder(collageBuffer, { name: fileName });
+
+            const embedPage = new EmbedBuilder()
+              .setTitle(`${EMOJI.shenheGroove} 5★ Gallery ${index + 1}/${galleryPages.length}`)
+              .setDescription(page.map(([name, count]) => `**${name}** x${count}`).join(" • "))
+              .setColor(0xf39c12)
+              .setImage(`attachment://${fileName}`);
+
+            await interaction.followUp({ embeds: [embedPage], files: [attachment] });
+          }
+        }
+        return;
+      }
+    });
+
+    collector.on("end", async () => {
+      try {
+        const disabledRows = buildSortAndPaginationRows(pages, currentPage, currentSort).map((row) => {
+          const components = row.components.map((comp) => {
+            if (comp instanceof StringSelectMenuBuilder) {
+              return StringSelectMenuBuilder.from(comp).setDisabled(true);
+            }
+            if (comp instanceof ButtonBuilder) {
+              return ButtonBuilder.from(comp).setDisabled(true);
+            }
+            return comp;
+          });
+          return new ActionRowBuilder().addComponents(...components);
+        });
+        await rosterMessage.edit({ components: disabledRows });
+      } catch {
+        // Ignore edit errors if message was removed.
+      }
+    });
 
     const ownedCharacterNames = [...new Set([
       ...Object.keys(profile.inventory.fiveStar),
@@ -1917,8 +2145,8 @@ client.on("messageCreate", async (message) => {
 
       const pickerMessage = await message.channel.send({ embeds: [previewEmbed], components: pickerRows });
 
-      const collector = pickerMessage.createMessageComponentCollector({ time: 10 * 60 * 1000 });
-      collector.on("collect", async (interaction) => {
+      const pickerCollector = pickerMessage.createMessageComponentCollector({ time: 10 * 60 * 1000 });
+      pickerCollector.on("collect", async (interaction) => {
         if (!interaction.customId.startsWith(pickerIdPrefix)) return;
 
         if (interaction.user.id !== message.author.id) {
@@ -1939,7 +2167,7 @@ client.on("messageCreate", async (message) => {
         await interaction.update({ embeds: [updatedEmbed], components: pickerRows });
       });
 
-      collector.on("end", async () => {
+      pickerCollector.on("end", async () => {
         try {
           const disabledRows = pickerRows.map((row) => {
             const disabled = StringSelectMenuBuilder.from(row.components[0]).setDisabled(true);

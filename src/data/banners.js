@@ -260,8 +260,41 @@ function getTodayBanner(now = new Date()) {
   };
 }
 
+async function getVotedBanner(votes, bannerHistory) {
+  if (!votes || Object.keys(votes).length === 0) {
+    const randomChar = CHARACTERS.fiveStarFeatured[Math.floor(Math.random() * CHARACTERS.fiveStarFeatured.length)];
+    return { character: randomChar, source: "random" };
+  }
+
+  const sortedVotes = Object.entries(votes)
+    .filter(([char]) => CHARACTERS.fiveStarFeatured.includes(char))
+    .sort((a, b) => b[1] - a[1]);
+
+  if (sortedVotes.length === 0) {
+    const randomChar = CHARACTERS.fiveStarFeatured[Math.floor(Math.random() * CHARACTERS.fiveStarFeatured.length)];
+    return { character: randomChar, source: "random" };
+  }
+
+  const recentChars = new Set(bannerHistory.slice(0, 3).map((h) => h.character));
+  
+  for (const [character, voteCount] of sortedVotes) {
+    if (!recentChars.has(character)) {
+      return { character, source: "voted", voteCount };
+    }
+  }
+
+  const nextBestChar = sortedVotes.find(([char]) => !recentChars.has(char));
+  if (nextBestChar) {
+    return { character: nextBestChar[0], source: "voted_alternative", voteCount: nextBestChar[1] };
+  }
+
+  const randomChar = CHARACTERS.fiveStarFeatured[Math.floor(Math.random() * CHARACTERS.fiveStarFeatured.length)];
+  return { character: randomChar, source: "random_rerun_overflow" };
+}
+
 module.exports = {
   CHARACTERS,
   CHARACTER_ELEMENTS,
-  getTodayBanner
+  getTodayBanner,
+  getVotedBanner
 };

@@ -26,6 +26,29 @@ const userProfileSchema = new mongoose.Schema(
 
 const UserProfile = mongoose.model("UserProfile", userProfileSchema);
 
+const bannerVotesSchema = new mongoose.Schema(
+  {
+    _id: { type: String, default: "banner_votes_current" },
+    votes: { type: Map, of: Number, default: {} },
+    lastReset: { type: Date, default: Date.now }
+  },
+  { collection: "banner_votes" }
+);
+
+const bannerHistorySchema = new mongoose.Schema(
+  {
+    _id: String,
+    date: String,
+    featuredCharacter: String,
+    featuredFourStars: [String],
+    timestamp: { type: Date, default: Date.now }
+  },
+  { collection: "banner_history" }
+);
+
+const BannerVotes = mongoose.model("BannerVotes", bannerVotesSchema);
+const BannerHistory = mongoose.model("BannerHistory", bannerHistorySchema);
+
 async function connectDatabase() {
   if (!MONGODB_URI) {
     throw new Error("MONGODB_URI environment variable is not set");
@@ -151,11 +174,76 @@ async function saveUserProfile(userId, profile) {
   await UserProfile.updateOne({ _id: userId }, { $set: profileData }, { upsert: true });
 }
 
+async function saveBannerVote(characterName) {
+  await connectDatabase();
+  const doc = await BannerVotes.findById("banner_votes_current");
+  
+  if (!doc) {
+    await BannerVotes.create({
+      _id: "banner_votes_current",
+      votes: { [characterName]: 1 },
+      lastReset: Date.now()
+    });
+  } else {
+    const votes = Object.fromEntries(doc.votes);
+    votes[characterName] = (votes[characterName] || 0) + 1;
+    await BannerVotes.updateOne(
+      { _id: "banner_votes_current" },
+      { $set: { votes } }
+    );
+  }
+}
+
+async function getBannerVotes() {
+  await connectDatabase();
+  const doc = await BannerVotes.findById("banner_votes_current");
+  
+  if (!doc) {
+    return {};
+  }
+  
+  return Object.fromEntries(doc.votes);
+}
+
+async function resetBannerVotes() {
+  await connectDatabase();
+  await BannerVotes.updateOne(
+    { _id: "banner_votes_current" },
+    { $set: { votes: {}, lastReset: Date.now() } },
+    { upsert: true }
+  );
+}
+
+async function saveBannerHistory(date, featuredCharacter, featuredFourStars) {
+  await connectDatabase();
+  await BannerHistory.create({
+    _id: date,
+    date,
+    featuredCharacter,
+    featuredFourStars,
+    timestamp: Date.now()
+  });
+}
+
+async function getBannerHistory(days = 21) {
+  await connectDatabase();
+  const pastDate = new Date();
+  pastDate.setDate(pastDate.getDate() - days);
+  
+  const history = await BannerHistory.find({ timestamp: { $gte: pastDate } }).sort({ timestamp: -1 });
+  return history.map((doc) => ({ date: doc.date, character: doc.featuredCharacter }));
+}
+
 module.exports = {
   loadUsers,
   saveUsers,
   getProfile,
   loadUserProfile,
   saveUserProfile,
-  connectDatabase
+  connectDatabase,
+  saveBannerVote,
+  getBannerVotes,
+  resetBannerVotes,
+  saveBannerHistory,
+  getBannerHistory
 };

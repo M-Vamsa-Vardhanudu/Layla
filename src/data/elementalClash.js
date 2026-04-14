@@ -444,10 +444,26 @@ function chooseMoveType(player) {
 }
 
 function calcCharacterPower(player) {
-  const rarityBonus = player.character.rarity === "fiveStar" ? 0.18 : 0.1;
+  const rarityBonusBase = player.character.rarity === "fiveStar" ? 0.18 : 0.1;
+  const rarityScale = player.character.rarity === "fourStar" ? 0.8 : 1.0;
+  const rarityBonus = rarityBonusBase * rarityScale;
   const copyBonus = Math.min(0.1, Math.max(0, player.character.copies - 1) * 0.012);
   const levelBonus = Math.min(0.08, player.profile.level * 0.004);
   return 1 + rarityBonus + copyBonus + levelBonus;
+}
+
+function getCharacterDamageVariance(rarity) {
+  if (rarity === "fiveStar") {
+    return 0.7 + Math.random() * 0.6;
+  }
+  return 0.9 + Math.random() * 0.2;
+}
+
+function getCharacterWinRate(rarity) {
+  if (rarity === "fiveStar") {
+    return 0.75;
+  }
+  return 0.65;
 }
 
 function calcMoveMultiplier(moveType) {
@@ -472,7 +488,10 @@ function formatRoundLine(player, move, damage, reactionName, counterDamage, reso
 }
 
 async function grantRewards(session, saveUserProfile, loadUsers, getProfile, emoji, won) {
-  const reward = won ? 24 : 8;
+  const baseReward = won ? 3000 : 500;
+  const roundBonus = session.round * (won ? 300 : 50);
+  const difficultyBonus = won ? 500 : 0;
+  const reward = baseReward + roundBonus + difficultyBonus;
   const users = await loadUsers();
 
   for (const player of session.players) {
@@ -482,8 +501,8 @@ async function grantRewards(session, saveUserProfile, loadUsers, getProfile, emo
   }
 
   const text = won
-    ? `${emoji?.primogem || ""} Team clear reward: **${reward}** primogems each.`
-    : `${emoji?.primogem || ""} Consolation reward: **${reward}** primogems each.`;
+    ? `${emoji?.primogem || ""} Team clear reward: **${reward}** primogems each (base ${baseReward} + round ${roundBonus} + bonus ${difficultyBonus}).`
+    : `${emoji?.primogem || ""} Consolation reward: **${reward}** primogems each (base ${baseReward} + round ${roundBonus}).`;
 
   return text;
 }
@@ -749,10 +768,16 @@ async function startElementalClashSession({
         const reaction = chooseReactionBonus(previousElement, player.element, fieldAura);
         const elementMultiplier = bossElementMultiplier(player.element, session.boss);
         const power = calcCharacterPower(player);
-        const variance = 0.9 + Math.random() * 0.2;
+        const variance = getCharacterDamageVariance(player.character.rarity);
         const moveMultiplier = calcMoveMultiplier(move.type);
+        const winRate = getCharacterWinRate(player.character.rarity);
+        const isSuccessHit = Math.random() < winRate;
 
         let damage = Math.round(move.baseDamage * moveMultiplier * power * elementMultiplier * reaction.multiplier * variance);
+        if (isSuccessHit) {
+          damage = Math.round(damage * 1.25);
+        }
+
         if (move.type === "guard") {
           damage = Math.max(0, Math.round(18 * power));
         }
