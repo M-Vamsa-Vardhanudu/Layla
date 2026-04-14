@@ -9,7 +9,7 @@ A Discord bot with:
 
 ## Features
 
-- Daily rotating banner (`!banner`)
+- 3-day rotating banner (`!banner`)
 - Wishing (`!wish 1` or `!wish 10`)
   - 5-star base chance: 0.6%
   - 4-star base chance: 5.7%

@@ -207,18 +207,14 @@ const CHARACTER_ELEMENTS = {
   "Yun Jin": "GEO"
 };
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+const BANNER_ROTATION_DAYS = 3;
+const BANNER_ROTATION_MS = BANNER_ROTATION_DAYS * DAY_MS;
+
 function seededIndex(seed, length) {
   if (length <= 0) return 0;
   const value = Math.imul(seed ^ 0x9e3779b9, 0x85ebca6b) >>> 0;
   return value % length;
-}
-
-function mondayStartUtc(date) {
-  const d = new Date(date);
-  d.setUTCHours(0, 0, 0, 0);
-  const day = (d.getUTCDay() + 6) % 7;
-  d.setUTCDate(d.getUTCDate() - day);
-  return d;
 }
 
 function pickWeeklyFourStars(seed, pool, count) {
@@ -240,15 +236,28 @@ function pickWeeklyFourStars(seed, pool, count) {
   return picked;
 }
 
+function getBannerCycleWindow(now = new Date()) {
+  const timeMs = now instanceof Date ? now.getTime() : Number(now);
+  const cycleIndex = Math.floor(timeMs / BANNER_ROTATION_MS);
+  const cycleStart = new Date(cycleIndex * BANNER_ROTATION_MS);
+  const cycleEnd = new Date((cycleIndex + 1) * BANNER_ROTATION_MS);
+
+  return {
+    cycleIndex,
+    cycleStart,
+    cycleEnd,
+    rotationDays: BANNER_ROTATION_DAYS
+  };
+}
+
 function getTodayBanner(now = new Date()) {
-  const monday = mondayStartUtc(now);
-  const weekKey = Math.floor(monday.getTime() / (7 * 86400000));
+  const cycle = getBannerCycleWindow(now);
 
   const featuredFiveStar = CHARACTERS.fiveStarFeatured[
-    seededIndex(weekKey, CHARACTERS.fiveStarFeatured.length)
+    seededIndex(cycle.cycleIndex, CHARACTERS.fiveStarFeatured.length)
   ];
   const featuredFourStars = pickWeeklyFourStars(
-    weekKey ^ 0x27d4eb2d,
+    cycle.cycleIndex ^ 0x27d4eb2d,
     CHARACTERS.fourStarPool,
     3
   );
@@ -256,7 +265,10 @@ function getTodayBanner(now = new Date()) {
   return {
     name: `${featuredFiveStar} Featured Banner`,
     featuredFiveStar,
-    featuredFourStars
+    featuredFourStars,
+    resetAt: cycle.cycleEnd,
+    startedAt: cycle.cycleStart,
+    rotationDays: cycle.rotationDays
   };
 }
 

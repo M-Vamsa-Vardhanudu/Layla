@@ -321,6 +321,32 @@ function formatRemainingDuration(ms) {
   return `${hours}h ${minutes}m`;
 }
 
+function formatDaysHoursRemaining(ms) {
+  const clampedMs = Math.max(0, ms);
+  const totalHours = Math.ceil(clampedMs / (60 * 60 * 1000));
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  return `${days}d ${hours}h`;
+}
+
+function formatTopVoteStandings(votes, limit = 3) {
+  const entries = Object.entries(votes || {})
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
+
+  if (entries.length === 0) {
+    return "No votes yet.";
+  }
+
+  const totalVotes = entries.reduce((sum, [, count]) => sum + count, 0);
+  return entries
+    .slice(0, limit)
+    .map(([name, count], index) => {
+      const percentage = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
+      return `${index + 1}. ${name} - ${count} votes (${percentage}%)`;
+    })
+    .join("\n");
+}
+
 function flipCoin() {
   return Math.random() < 0.5 ? "heads" : "tails";
 }
@@ -987,6 +1013,8 @@ client.on("messageCreate", async (message) => {
 
   if (cmd === "banner") {
     const banner = getTodayBanner();
+    const remainingMs = Math.max(0, new Date(banner.resetAt).getTime() - Date.now());
+    const timeLeft = formatDaysHoursRemaining(remainingMs);
 
     const embed = new EmbedBuilder()
       .setTitle(`Today's Banner: ${banner.name}`)
@@ -994,7 +1022,8 @@ client.on("messageCreate", async (message) => {
         formatAestheticBlock([
           `${EMOJI.shenheGroove} Featured 5-star: ${banner.featuredFiveStar}`,
           `${EMOJI.laylaConfident} Featured 4-stars: ${banner.featuredFourStars.join(", ")}`,
-          `${EMOJI.primogem} Wish cost: ${WISH_COST} primogems per pull`
+          `${EMOJI.primogem} Wish cost: ${WISH_COST} primogems per pull`,
+          `${EMOJI.shenheTea} Resets in: **${timeLeft}** (every ${banner.rotationDays} days)`
         ])
       )
       .setColor(0xf1c40f)
@@ -1022,6 +1051,9 @@ client.on("messageCreate", async (message) => {
         value: name,
         description: `${name} featured vote`
       }));
+
+    const currentVotes = await getBannerVotes();
+    const topStandings = formatTopVoteStandings(currentVotes, 3);
 
     let selectedCharacter = null;
     const voteIdPrefix = `vote_${message.id}`;
@@ -1055,6 +1087,7 @@ client.on("messageCreate", async (message) => {
         formatAestheticBlock([
           "Choose one featured 5-star from the dropdown.",
           `Selected: **${selectedCharacter || "None"}**`,
+          `Top 3 right now:\n${topStandings}`,
           "Press Confirm Vote to submit.",
           "You can vote once every 24 hours."
         ])
@@ -1126,6 +1159,7 @@ client.on("messageCreate", async (message) => {
           const totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
           const charVotes = votes[selectedCharacter] || 0;
           const percentage = totalVotes > 0 ? Math.round((charVotes / totalVotes) * 100) : 0;
+          const topAfterVote = formatTopVoteStandings(votes, 3);
 
           const voteEmbed = new EmbedBuilder()
             .setTitle(`${EMOJI.shenheSmile} Vote Recorded`)
@@ -1135,6 +1169,7 @@ client.on("messageCreate", async (message) => {
                 `Character: **${selectedCharacter}**`,
                 "Your vote counted successfully.",
                 `Current votes: **${charVotes}** (${percentage}% of ${totalVotes} total)`,
+                `Top 3 now:\n${topAfterVote}`,
                 "You can vote again after 24 hours."
               ])
             );
