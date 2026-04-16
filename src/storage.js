@@ -219,13 +219,18 @@ async function resetBannerVotes() {
 
 async function saveBannerHistory(date, featuredCharacter, featuredFourStars) {
   await connectDatabase();
-  await BannerHistory.create({
-    _id: date,
-    date,
-    featuredCharacter,
-    featuredFourStars,
-    timestamp: Date.now()
-  });
+  await BannerHistory.updateOne(
+    { _id: date },
+    {
+      $set: {
+        date,
+        featuredCharacter,
+        featuredFourStars,
+        timestamp: Date.now()
+      }
+    },
+    { upsert: true }
+  );
 }
 
 async function getBannerHistory(days = 21) {

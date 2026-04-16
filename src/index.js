@@ -19,7 +19,7 @@ const {
 const { getTodayBanner, CHARACTERS, CHARACTER_ELEMENTS, getVotedBanner } = require("./data/banners");
 const { getRandomTrivia } = require("./data/trivia");
 const { startElementalClashSession } = require("./data/elementalClash");
-const { loadUsers, saveUsers, getProfile, loadUserProfile, saveUserProfile, connectDatabase, saveBannerVote, getBannerVotes, getBannerHistory } = require("./storage");
+const { loadUsers, saveUsers, getProfile, loadUserProfile, saveUserProfile, connectDatabase, saveBannerVote, getBannerVotes, resetBannerVotes, saveBannerHistory, getBannerHistory } = require("./storage");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const PREFIX = process.env.PREFIX || "!";
@@ -937,9 +937,46 @@ function buildWishSlideEmbed(username, bannerName, results, index) {
   return embed;
 }
 
+async function getActiveBanner(now = new Date()) {
+  const scheduledBanner = getTodayBanner(now);
+  const cycleKey = scheduledBanner.startedAt.toISOString();
+  const bannerHistory = await getBannerHistory();
+  const currentCycleBanner = bannerHistory.find((entry) => entry.date === cycleKey);
+
+  if (currentCycleBanner) {
+    return {
+      ...scheduledBanner,
+      featuredFiveStar: currentCycleBanner.character,
+      name: `${currentCycleBanner.character} Featured Banner`
+    };
+  }
+
+  const votes = await getBannerVotes();
+  const votedBanner = await getVotedBanner(votes, bannerHistory);
+  const featuredFiveStar = votedBanner.character || scheduledBanner.featuredFiveStar;
+
+  await saveBannerHistory(cycleKey, featuredFiveStar, scheduledBanner.featuredFourStars);
+  await resetBannerVotes();
+
+  return {
+    ...scheduledBanner,
+    featuredFiveStar,
+    name: `${featuredFiveStar} Featured Banner`
+  };
+}
+
 client.once("clientReady", () => {
   console.log(`Logged in as ${client.user.tag}`);
   console.log(`Pools loaded -> 5-star: ${ACTIVE_POOLS.fiveStarStandard.length}, 4-star: ${ACTIVE_POOLS.fourStarPool.length}`);
+});
+
+client.once("clientReady", async () => {
+  try {
+    const banner = await getActiveBanner();
+    console.log(`Active banner resolved -> ${banner.featuredFiveStar}`);
+  } catch (error) {
+    console.error("Failed to resolve active banner:", error);
+  }
 });
 
 client.on("messageCreate", async (message) => {
@@ -1012,7 +1049,7 @@ client.on("messageCreate", async (message) => {
   }
 
   if (cmd === "banner") {
-    const banner = getTodayBanner();
+    const banner = await getActiveBanner();
     const remainingMs = Math.max(0, new Date(banner.resetAt).getTime() - Date.now());
     const timeLeft = formatDaysHoursRemaining(remainingMs);
 
@@ -1034,6 +1071,8 @@ client.on("messageCreate", async (message) => {
   }
 
   if (cmd === "vote") {
+    await getActiveBanner();
+
     const now = Date.now();
     const elapsed = now - (profile.lastBannerVoteAt || 0);
     if (elapsed < BANNER_VOTE_COOLDOWN_MS) {
@@ -2345,7 +2384,7 @@ client.on("messageCreate", async (message) => {
       return;
     }
 
-    const banner = getTodayBanner();
+    const banner = await getActiveBanner();
     const results = [];
 
     profile.primogems -= cost;
