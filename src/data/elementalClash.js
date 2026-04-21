@@ -888,20 +888,6 @@ async function startElementalClashSession({
       session.boss.maxHp = Math.round(session.boss.maxHp * 3.1);
 
       session.hardPartyProfile = getHardPartyProfile(session.players, session.boss);
-
-      const hardEligible = session.players.filter((entry) => isC6FiveStarCharacter(entry.character)).length;
-      if (hardEligible === 0) {
-        await message.channel.send(`${emoji.laylaSad} Hard mode warning: no party member has a C6 5-star character. This run is expected to fail.`);
-      }
-
-      if (session.hardPartyProfile) {
-        const profileMessage = session.hardPartyProfile === "weak_neutral"
-          ? "Party profile: Weak + Neutral configured (~60-65% target win rate)."
-          : session.hardPartyProfile === "neutral_only"
-            ? "Party profile: Neutral configured (~50% target win rate)."
-            : "Party profile: Resistance configured (~30-35% target win rate).";
-        await message.channel.send(`${emoji.shenheTea} ${profileMessage}`);
-      }
     }
     session.bossHp = scaleBossHpForParty(session.boss.maxHp, session.players, session.boss);
 

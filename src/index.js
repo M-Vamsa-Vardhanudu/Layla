@@ -1049,6 +1049,8 @@ client.on("messageCreate", async (message) => {
           `${AESTHETIC_EMOJIS[3]} \`${PREFIX}clashauto <character|clear>\` — Set your default auto-picked clash character`,
           `${AESTHETIC_EMOJIS[3]} \`${PREFIX}clashfix <action> [args]\` — Fallback when clash buttons fail`,
           `${AESTHETIC_EMOJIS[4]} Clash cooldown: **${Math.floor(CLASH_NORMAL_COOLDOWN_MS / 60000)}m normal / ${Math.floor(CLASH_HARD_COOLDOWN_MS / 60000)}m hard**`,
+          `${AESTHETIC_EMOJIS[0]} Clash entry fee: **500 normal / 1000 hard**`,
+          `${AESTHETIC_EMOJIS[1]} Clash clear reward: **1000 normal / 4000 hard**`,
           "",
           "━━━━━━━━━━━━━━━━━━━",
           `${EMOJI.shenheTea} **Gambling & Trading**`,
