@@ -26,8 +26,8 @@ const PREFIX = process.env.PREFIX || "!";
 const WISH_COST = 160;
 const WISH_EMBED_COLOR = 0xf39c12;
 const WISH_COOLDOWN_MS = 10 * 1000;
-const CLASH_NORMAL_COOLDOWN_MS = 3 * 60 * 1000;
-const CLASH_HARD_COOLDOWN_MS = 5 * 60 * 1000;
+const CLASH_NORMAL_COOLDOWN_MS = 2 * 60 * 1000;
+const CLASH_HARD_COOLDOWN_MS = 2 * 60 * 1000;
 const TRIVIA_COOLDOWN_MS = 3 * 1000;
 const ACTIVITY_COOLDOWN_MS = 2 * 60 * 1000;
 const ACTIVITY_REWARD_PRIMOS = 8;
@@ -1045,12 +1045,7 @@ client.on("messageCreate", async (message) => {
           `${EMOJI.laylaConfident} **Mini-Games & Events**`,
           `${AESTHETIC_EMOJIS[0]} \`${PREFIX}trivia\` — Get a trivia question for primogem rewards`,
           `${AESTHETIC_EMOJIS[1]} \`${PREFIX}answer <text>\` — Answer active trivia`,
-          `${AESTHETIC_EMOJIS[2]} \`${PREFIX}clash [hard]\` — Elemental Clash raid (add hard for Dottore mode)`,
-          `${AESTHETIC_EMOJIS[3]} \`${PREFIX}clashauto <character|clear>\` — Set your default auto-picked clash character`,
-          `${AESTHETIC_EMOJIS[3]} \`${PREFIX}clashfix <action> [args]\` — Fallback when clash buttons fail`,
-          `${AESTHETIC_EMOJIS[4]} Clash cooldown: **${Math.floor(CLASH_NORMAL_COOLDOWN_MS / 60000)}m normal / ${Math.floor(CLASH_HARD_COOLDOWN_MS / 60000)}m hard**`,
-          `${AESTHETIC_EMOJIS[0]} Clash entry fee: **500 normal / 1000 hard**`,
-          `${AESTHETIC_EMOJIS[1]} Clash clear reward: **1000 normal / 4000 hard**`,
+          `${AESTHETIC_EMOJIS[2]} \`${PREFIX}clash\` — Elemental Clash info and start modes`,
           "",
           "━━━━━━━━━━━━━━━━━━━",
           `${EMOJI.shenheTea} **Gambling & Trading**`,
@@ -1367,8 +1362,31 @@ client.on("messageCreate", async (message) => {
   }
 
   if (cmd === "clash") {
-    const modeArg = String(args[0] || "normal").toLowerCase();
-    const difficulty = ["hard", "nightmare", "difficult"].includes(modeArg) ? "hard" : "normal";
+    const modeArg = String(args[0] || "").toLowerCase();
+    const difficulty = ["hard", "nightmare", "difficult"].includes(modeArg) ? "hard" : ["normal", "easy", "standard"].includes(modeArg) ? "normal" : null;
+
+    if (!difficulty) {
+      const banner = await getActiveBanner();
+      const clashInfoEmbed = new EmbedBuilder()
+        .setTitle(`${EMOJI.shenheGroove} Elemental Clash`)
+        .setColor(0x7c2d12)
+        .setDescription(
+          formatAestheticBlock([
+            "Choose a mode to start a raid.",
+            `Use ${PREFIX}clash normal for the standard raid.`,
+            `Use ${PREFIX}clash hard for Dottore mode.`,
+            `Auto-pick your main unit with ${PREFIX}clashauto <character|clear>.`,
+            `If buttons fail, use ${PREFIX}clashfix <action> [args].`,
+            `Normal: 250 fee, 2000 reward per person.`,
+            `Hard: 500 fee, 5000 reward per person.`,
+            `Cooldown: 2 minutes for both modes.`
+          ])
+        )
+        .setImage(characterCardUrl(banner.featuredFiveStar));
+
+      await message.reply({ embeds: [clashInfoEmbed] });
+      return;
+    }
     const cooldownMs = difficulty === "hard" ? CLASH_HARD_COOLDOWN_MS : CLASH_NORMAL_COOLDOWN_MS;
     const cooldownStamp = difficulty === "hard" ? (profile.lastHardClashAt || 0) : (profile.lastClashAt || 0);
 

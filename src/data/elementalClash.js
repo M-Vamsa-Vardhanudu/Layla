@@ -11,18 +11,31 @@ const {
   ComponentType
 } = require("discord.js");
 
+// ============================================================================
+// CONFIGURATION & CONSTANTS
+// ============================================================================
+
 const ELEMENTS = ["PYRO", "HYDRO", "CRYO", "ELECTRO", "DENDRO", "ANEMO", "GEO"];
 const MIN_PLAYERS = 2;
 const MAX_PLAYERS = 4;
 const LOBBY_TIMEOUT_MS = 45 * 1000;
 const ROUND_COUNT = 5;
 const TURN_ACTION_TIMEOUT_MS = 25 * 1000;
-const NORMAL_CLASH_ENTRY_FEE = 500;
-const HARD_CLASH_ENTRY_FEE = 1000;
-const NORMAL_CLASH_WIN_REWARD = 1000;
-const HARD_CLASH_WIN_REWARD = 4000;
-const NORMAL_CLASH_LOSS_REWARD = 250;
-const HARD_CLASH_LOSS_REWARD = 800;
+
+// Economy - adjusted for better balance
+const NORMAL_CLASH_ENTRY_FEE = 250;
+const HARD_CLASH_ENTRY_FEE = 500;
+const NORMAL_CLASH_WIN_REWARD = 2000;
+const HARD_CLASH_WIN_REWARD = 5000;
+const NORMAL_CLASH_LOSS_REWARD = 150;
+const HARD_CLASH_LOSS_REWARD = 300;
+
+// Boss difficulty scaling
+const NORMAL_BOSS_HP_RANGE = { base: 2600, variance: 450 };
+const HARD_BOSS_HP_MULTIPLIER = 2.8;     // Reduced from 3.1 for better balance
+const HARD_BOSS_MIN_HP = 5800;
+
+// File paths
 const NORMAL_BOSS_ART_FILE = path.resolve(__dirname, "..", "..", "311882f16264d6498dcf1ae277b9e031_3641850878197328239.webp");
 const HARD_BOSS_ART_FILE = path.resolve(__dirname, "..", "..", "dottore.webp");
 const HARD_BOSS_ART_FALLBACK_URL = "https://imgs.search.brave.com/XjY3BE8SWEmcEcIVlc190h1GvgXq-RhsQseLhprF2Hw/rs:fit:860:0:0:0/g:ce/aHR0cHM6Ly9pLnJl/ZGQuaXQvMmdsdHJm/ZGJrejRnMS5wbmc";
@@ -46,6 +59,10 @@ const MOVE_LABELS = {
   burst: "Burst",
   guard: "Guard"
 };
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
@@ -85,35 +102,6 @@ function getBossResistances(boss) {
   }
 
   return [];
-}
-
-function getHardPartyProfile(players, boss) {
-  if (!Array.isArray(players) || players.length < 2) {
-    return null;
-  }
-
-  const matchups = players.map((player) => getElementMatchupType(player.element, boss));
-  const hasStrong = matchups.includes("strong");
-  const hasNeutral = matchups.includes("neutral");
-  const hasResisted = matchups.includes("resisted");
-
-  if (hasStrong && hasNeutral && !hasResisted) {
-    return "weak_neutral";
-  }
-
-  if (hasStrong && !hasResisted) {
-    return "weak_neutral";
-  }
-
-  if (matchups.every((matchup) => matchup === "neutral")) {
-    return "neutral_only";
-  }
-
-  if (hasResisted) {
-    return "resistance";
-  }
-
-  return "neutral_only";
 }
 
 function normalize(text) {
@@ -180,13 +168,14 @@ function getLeadCharacter(profile, characterElements) {
   const chosen = entries[0];
   const element = characterElements[chosen.name] || "ANEMO";
   const copies = chosen.count;
+  const effectiveCopies = Math.min(10, copies);
 
   return {
     name: chosen.name,
     rarity: chosen.rarity,
     copies,
     element,
-    power: (chosen.rarity === "fiveStar" ? 122 : 100) + Math.min(24, (copies - 1) * 4)
+    power: (chosen.rarity === "fiveStar" ? 122 : 100) + Math.min(24, (effectiveCopies - 1) * 4)
   };
 }
 
@@ -195,12 +184,14 @@ function getCharacterByName(profile, characterElements, characterName) {
   const picked = entries.find((entry) => normalize(entry.name) === normalize(characterName));
   if (!picked) return null;
 
+  const effectiveCopies = Math.min(10, picked.count);
+
   return {
     name: picked.name,
     rarity: picked.rarity,
     copies: picked.count,
     element: characterElements[picked.name] || "ANEMO",
-    power: (picked.rarity === "fiveStar" ? 122 : 100) + Math.min(24, (picked.count - 1) * 4)
+    power: (picked.rarity === "fiveStar" ? 122 : 100) + Math.min(24, (effectiveCopies - 1) * 4)
   };
 }
 
@@ -273,28 +264,28 @@ function chooseBoss() {
     resistances: [resistance],
     weakElements,
     aura,
-    maxHp: 2600 + Math.floor(Math.random() * 450)
+    maxHp: NORMAL_BOSS_HP_RANGE.base + Math.floor(Math.random() * NORMAL_BOSS_HP_RANGE.variance)
   };
 }
 
-function getMoveForPlayer(player, round) {
-  const resolveRatio = player.resolve / player.maxResolve;
-  const burstReady = player.burstCharge > 0;
-  const roll = Math.random();
+function getElementLabel(element) {
+  return titleCase(element || "Unknown");
+}
 
-  if (resolveRatio < 0.3 && roll < 0.45) {
-    return { kind: "guard", base: 0.0 };
-  }
+function getElementMatchupType(element, boss) {
+  const upper = String(element || "").toUpperCase();
+  if (getBossResistances(boss).includes(upper)) return "resisted";
+  if (boss.weakElements.includes(upper)) return "strong";
+  return "neutral";
+}
 
-  if (burstReady && (round >= 3 || roll < 0.22)) {
-    return { kind: "burst", base: 220.0 };
-  }
-
-  if (roll < 0.45) {
-    return { kind: "skill", base: 162.0 };
-  }
-
-  return { kind: "attack", base: 118.0 };
+function escapeXml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
 
 function formatPlayerLabel(player) {
@@ -314,12 +305,16 @@ function getPartyMatchupSummary(players, boss) {
     resistedCount: 0,
     strongCount: 0,
     neutralCount: 0,
-    fiveStarCount: 0
+    fiveStarCount: 0,
+    c6FiveStarCount: 0
   };
 
   for (const player of players) {
     if (player.character?.rarity === "fiveStar") {
       summary.fiveStarCount += 1;
+      if (isC6FiveStarCharacter(player.character)) {
+        summary.c6FiveStarCount += 1;
+      }
     }
 
     const matchup = getElementMatchupType(player.element, boss);
@@ -339,27 +334,168 @@ function scaleBossHpForParty(baseHp, players, boss) {
   const summary = getPartyMatchupSummary(players, boss);
   let hpScale = 1;
 
-  hpScale += summary.fiveStarCount * 0.06;
+  // More moderate 5-star scaling
+  hpScale += summary.fiveStarCount * 0.04;
 
+  // Neutral team penalty (slight)
   if (summary.neutralCount === players.length) {
-    hpScale += 0.02;
+    hpScale += 0.01;
   }
 
+  // Resisted matchup penalties
   if (summary.resistedCount === 1) {
-    hpScale += 0.14;
+    hpScale += 0.12;
   } else if (summary.resistedCount >= 2) {
-    hpScale += 0.32;
+    hpScale += 0.28;
   }
 
+  // Strong matchup bonuses (encourage strategy)
   if (summary.strongCount === 1) {
-    hpScale -= 0.1;
+    hpScale -= 0.08;
   } else if (summary.strongCount >= 2) {
-    hpScale -= 0.18;
+    hpScale -= 0.16;
   }
 
-  const scaled = Math.round(baseHp * Math.max(0.82, hpScale));
+  const scaled = Math.round(baseHp * Math.max(0.85, hpScale));
   return Math.max(2200, scaled);
 }
+
+function chooseReactionBonus(previousElement, currentElement, auraElement) {
+  const reactions = [];
+  const prevReaction = getReaction(previousElement, currentElement);
+  if (prevReaction) reactions.push(prevReaction);
+
+  const auraReaction = getReaction(auraElement, currentElement);
+  if (auraReaction) reactions.push(auraReaction);
+
+  if (!reactions.length) {
+    return { name: null, multiplier: 1 };
+  }
+
+  const best = reactions.reduce((winner, candidate) => (candidate.multiplier > winner.multiplier ? candidate : winner));
+  let multiplier = best.multiplier;
+  if (reactions.length > 1) {
+    multiplier += 0.06; // Reduced from 0.08
+  }
+
+  return {
+    name: best.name,
+    multiplier: Math.min(1.95, multiplier) // Reduced from 2.05
+  };
+}
+
+function calcCharacterPower(player) {
+  const rarityBonusBase = player.character.rarity === "fiveStar" ? 0.18 : 0.1;
+  const rarityScale = player.character.rarity === "fourStar" ? 0.8 : 1.0;
+  const rarityBonus = rarityBonusBase * rarityScale;
+  const copyBonus = Math.min(0.1, Math.max(0, player.character.copies - 1) * 0.012);
+  const levelBonus = Math.min(0.08, player.profile.level * 0.004);
+  return 1 + rarityBonus + copyBonus + levelBonus;
+}
+
+function getCharacterDamageVariance(rarity) {
+  if (rarity === "fiveStar") {
+    return 0.75 + Math.random() * 0.55; // Reduced variance for consistency
+  }
+  return 0.9 + Math.random() * 0.2;
+}
+
+function getTurnLossChance(player, boss) {
+  const matchup = getElementMatchupType(player.element, boss);
+  const baseLossChance = matchup === "resisted" ? 0.55 : matchup === "strong" ? 0.15 : 0.25;
+  const randomSwing = (0.03 + Math.random() * 0.05) * (Math.random() < 0.5 ? -1 : 1);
+  const chance = baseLossChance + randomSwing;
+  return Math.max(0.05, Math.min(0.92, chance));
+}
+
+function calcMoveMultiplier(moveType) {
+  switch (moveType) {
+    case "attack":
+      return 1;
+    case "skill":
+      return 1.25;     // Increased from 1.2
+    case "burst":
+      return 1.6;      // Increased from 1.55
+    case "guard":
+      return 0.2;      // Increased from 0.18
+    default:
+      return 1;
+  }
+}
+
+function formatRoundLine(player, move, damage, reactionName, counterDamage, resolveAfter) {
+  const reactionText = reactionName ? ` with ${reactionName}` : "";
+  const counterText = counterDamage > 0 ? ` | counter ${counterDamage}` : "";
+  return `${player.displayName}: ${MOVE_LABELS[move.type]}${reactionText} for ${damage}${counterText} | resolve ${Math.max(0, Math.round(resolveAfter))}`;
+}
+
+function parseFallbackActionArgs(args) {
+  const action = String(args?.[0] || "").toLowerCase();
+  const actionArgs = Array.isArray(args) ? args.slice(1) : [];
+  return { action, actionArgs };
+}
+
+// ============================================================================
+// HARD MODE BALANCE SYSTEM
+// ============================================================================
+
+/**
+ * Hard mode scaling based on party composition.
+ * Ensures C6 5-stars deal meaningful damage while non-C6 units still contribute.
+ */
+function getHardModeDamageMultiplier(player, party, boss) {
+  const summary = getPartyMatchupSummary(party, boss);
+  const isC6 = isC6FiveStarCharacter(player.character);
+  
+  // Base multiplier: C6 units do normal damage, others do reduced
+  let multiplier = isC6 ? 1.02 : 0.27;
+  
+  // Matchup bonuses still apply
+  const matchup = getElementMatchupType(player.element, boss);
+  if (matchup === "strong") {
+    multiplier *= isC6 ? 1.35 : 1.8;  // Non-C6 get boosted when matching elements
+  } else if (matchup === "resisted") {
+    multiplier *= 0.65;
+  }
+  
+  // Party composition bonus: more C6 units = stronger overall
+  const c6Ratio = summary.c6FiveStarCount / party.length;
+  if (c6Ratio >= 0.75) {
+    multiplier *= 0.97;  // Cap damage if party is overpowered
+  } else if (c6Ratio < 0.5) {
+    multiplier *= 1.08;  // Boost damage if underpowered
+  }
+  
+  return Math.max(0.15, multiplier);
+}
+
+/**
+ * Hard mode counter damage scales with party power.
+ */
+function getHardModeCounterMultiplier(player, party, boss) {
+  const summary = getPartyMatchupSummary(party, boss);
+  const isC6 = isC6FiveStarCharacter(player.character);
+  
+  // Base: non-C6 take significantly more damage
+  let multiplier = isC6 ? 1.25 : 2.25;
+  
+  // Element matchup reduces counter damage
+  const matchup = getElementMatchupType(player.element, boss);
+  if (matchup === "strong") {
+    multiplier *= 0.75;
+  }
+  
+  // Defensive bonuses (shield/guard) reduce it
+  if (player.shield > 15) {
+    multiplier *= 0.8;
+  }
+  
+  return Math.max(0.5, multiplier);
+}
+
+// ============================================================================
+// RENDERING & DISPLAY
+// ============================================================================
 
 function buildBattleCardSvg({ boss, hpRemaining, round, totalRounds, fieldAura, players, combatLog }) {
   const hpPct = Math.max(0, Math.min(1, hpRemaining / boss.maxHp));
@@ -451,7 +587,7 @@ async function renderBossCardBuffer(session) {
           .toBuffer();
       }
     } catch {
-      // Ignore remote art failures and use generated fallback.
+      // Ignore remote art failures
     }
   }
 
@@ -495,6 +631,10 @@ async function renderBossCardBuffer(session) {
     .toBuffer();
 }
 
+// ============================================================================
+// PLAYER STATE & SETUP
+// ============================================================================
+
 function createPlayerState(user, profile, characterElements, preferredCharacterName = null) {
   const selected = preferredCharacterName
     ? getCharacterByName(profile, characterElements, preferredCharacterName)
@@ -524,13 +664,13 @@ function buildLobbyEmbed(session, emoji) {
   const entryFee = getClashEntryFee(session.difficulty);
 
   return new EmbedBuilder()
-    .setTitle(`${emoji?.shenheGroove || "Elemental Clash"} Elemental Clash Lobby`)
+    .setTitle(`${emoji?.shenheGroove || "🎵"} Elemental Clash Lobby`)
     .setDescription(
       [
-        "Join the raid, choose your character from your dropdown, then start.",
+        "Join the raid and test your team against the boss.",
         `Difficulty: **${isHardMode ? "Hard (Dottore)" : "Normal"}**`,
         `Entry fee: **${entryFee}** primogems (charged when battle starts).`,
-        isHardMode ? "Hard rule: only **C6 5-star** characters can meaningfully damage this boss." : null,
+        isHardMode ? "**Hard mode:** C6 5-stars deal full damage; other characters deal reduced damage but get element bonuses." : null,
         "",
         `Players: **${session.players.length}/${MAX_PLAYERS}**`,
         `Need at least **${MIN_PLAYERS}** players to start.`,
@@ -546,7 +686,7 @@ function buildFinalEmbed(session, emoji, outcomeText) {
   const losers = session.players.filter((player) => !player.active).map((player) => player.displayName);
 
   return new EmbedBuilder()
-    .setTitle(`${emoji?.shenheSmile || "Elemental Clash"} Elemental Clash Result`)
+    .setTitle(`${emoji?.shenheSmile || "✨"} Elemental Clash Result`)
     .setDescription(
       [
         outcomeText,
@@ -562,70 +702,9 @@ function buildFinalEmbed(session, emoji, outcomeText) {
     .setColor(session.bossHp <= 0 ? 0x2ecc71 : 0xe74c3c);
 }
 
-function chooseReactionBonus(previousElement, currentElement, auraElement) {
-  const reactions = [];
-  const prevReaction = getReaction(previousElement, currentElement);
-  if (prevReaction) reactions.push(prevReaction);
-
-  const auraReaction = getReaction(auraElement, currentElement);
-  if (auraReaction) reactions.push(auraReaction);
-
-  if (!reactions.length) {
-    return { name: null, multiplier: 1 };
-  }
-
-  const best = reactions.reduce((winner, candidate) => (candidate.multiplier > winner.multiplier ? candidate : winner));
-  let multiplier = best.multiplier;
-  if (reactions.length > 1) {
-    multiplier += 0.08;
-  }
-
-  return {
-    name: best.name,
-    multiplier: Math.min(2.05, multiplier)
-  };
-}
-
-function chooseMoveType(player) {
-  const ratio = player.resolve / player.maxResolve;
-  const roll = Math.random();
-
-  if (ratio < 0.35 && roll < 0.45) return { type: "guard", baseDamage: 0 };
-  if (player.burstCharge > 0 && (roll < 0.22 || ratio > 0.72)) return { type: "burst", baseDamage: 222 };
-  if (roll < 0.55) return { type: "skill", baseDamage: 160 };
-  return { type: "attack", baseDamage: 118 };
-}
-
-function calcCharacterPower(player) {
-  const rarityBonusBase = player.character.rarity === "fiveStar" ? 0.18 : 0.1;
-  const rarityScale = player.character.rarity === "fourStar" ? 0.8 : 1.0;
-  const rarityBonus = rarityBonusBase * rarityScale;
-  const copyBonus = Math.min(0.1, Math.max(0, player.character.copies - 1) * 0.012);
-  const levelBonus = Math.min(0.08, player.profile.level * 0.004);
-  return 1 + rarityBonus + copyBonus + levelBonus;
-}
-
-function getCharacterDamageVariance(rarity) {
-  if (rarity === "fiveStar") {
-    return 0.7 + Math.random() * 0.6;
-  }
-  return 0.9 + Math.random() * 0.2;
-}
-
-function getElementMatchupType(element, boss) {
-  const upper = String(element || "").toUpperCase();
-  if (getBossResistances(boss).includes(upper)) return "resisted";
-  if (boss.weakElements.includes(upper)) return "strong";
-  return "neutral";
-}
-
-function getTurnLossChance(player, boss) {
-  const matchup = getElementMatchupType(player.element, boss);
-  const baseLossChance = matchup === "resisted" ? 0.62 : matchup === "strong" ? 0.18 : 0.28;
-  const randomSwing = (0.03 + Math.random() * 0.06) * (Math.random() < 0.5 ? -1 : 1);
-  const chance = baseLossChance + randomSwing;
-  return Math.max(0.05, Math.min(0.95, chance));
-}
+// ============================================================================
+// ECONOMY & REWARDS
+// ============================================================================
 
 async function collectEntryFees(session, saveUserProfile, loadUsers, getProfile) {
   const entryFee = getClashEntryFee(session.difficulty);
@@ -651,33 +730,6 @@ async function collectEntryFees(session, saveUserProfile, loadUsers, getProfile)
   return { removedPlayers };
 }
 
-function calcMoveMultiplier(moveType) {
-  switch (moveType) {
-    case "attack":
-      return 1;
-    case "skill":
-      return 1.2;
-    case "burst":
-      return 1.55;
-    case "guard":
-      return 0.18;
-    default:
-      return 1;
-  }
-}
-
-function formatRoundLine(player, move, damage, reactionName, counterDamage, resolveAfter) {
-  const reactionText = reactionName ? ` with ${reactionName}` : "";
-  const counterText = counterDamage > 0 ? ` | counter ${counterDamage}` : "";
-  return `${player.displayName}: ${MOVE_LABELS[move.type]}${reactionText} for ${damage}${counterText} | resolve ${Math.max(0, Math.round(resolveAfter))}`;
-}
-
-function parseFallbackActionArgs(args) {
-  const action = String(args?.[0] || "").toLowerCase();
-  const actionArgs = Array.isArray(args) ? args.slice(1) : [];
-  return { action, actionArgs };
-}
-
 async function grantRewards(session, saveUserProfile, loadUsers, getProfile, emoji, won) {
   const hardMode = session.difficulty === "hard";
   const reward = won
@@ -697,6 +749,10 @@ async function grantRewards(session, saveUserProfile, loadUsers, getProfile, emo
 
   return text;
 }
+
+// ============================================================================
+// MAIN BATTLE LOGIC
+// ============================================================================
 
 async function startElementalClashSession({
   message,
@@ -823,7 +879,6 @@ async function startElementalClashSession({
   }
 
   const lobbyMessage = await message.reply(lobbyPayload);
-
   session.lobbyMessage = lobbyMessage;
 
   const refreshLobby = async () => {
@@ -833,7 +888,7 @@ async function startElementalClashSession({
         components: buildRows(false)
       });
     } catch {
-      // Ignore edit errors when the message is removed.
+      // Ignore edit errors
     }
   };
   session.refreshLobby = refreshLobby;
@@ -853,7 +908,7 @@ async function startElementalClashSession({
     try {
       await lobbyMessage.edit({ components: [] });
     } catch {
-      // Ignore edit errors when the message is removed.
+      // Ignore edit errors
     }
   };
   session.cleanup = cleanup;
@@ -877,6 +932,7 @@ async function startElementalClashSession({
     }
 
     session.boss = chooseBoss();
+    
     if (session.difficulty === "hard") {
       const resistances = shuffle(ELEMENTS).slice(0, 2);
       const weakness = pick(ELEMENTS.filter((element) => !resistances.includes(element)));
@@ -885,10 +941,9 @@ async function startElementalClashSession({
       session.boss.resistances = resistances;
       session.boss.resistance = resistances[0];
       session.boss.weakElements = [weakness];
-      session.boss.maxHp = Math.round(session.boss.maxHp * 3.1);
-
-      session.hardPartyProfile = getHardPartyProfile(session.players, session.boss);
+      session.boss.maxHp = Math.max(HARD_BOSS_MIN_HP, Math.round(session.boss.maxHp * HARD_BOSS_HP_MULTIPLIER));
     }
+    
     session.bossHp = scaleBossHpForParty(session.boss.maxHp, session.players, session.boss);
 
     try {
@@ -913,7 +968,7 @@ async function startElementalClashSession({
         ...startPayload
       });
     } catch {
-      // Ignore edit errors when the message is removed.
+      // Ignore edit errors
     }
 
     const battleMessage = lobbyMessage;
@@ -945,7 +1000,7 @@ async function startElementalClashSession({
               `Character: **${player.character.name}** (${getElementLabel(player.element)})`,
               `Resolve: **${Math.round(player.resolve)} / ${player.maxResolve}**`,
               `Burst Charges: **${player.burstCharge}**`,
-              `Boss HP: **${Math.max(0, session.bossHp)} / ${session.boss.maxHp}**`,
+              `Boss HP: **${Math.max(0, Math.round(session.bossHp))} / ${session.boss.maxHp}**`,
               `Boss Resistances: **${getBossResistances(session.boss).map(getElementLabel).join(", ")}**`,
               `Boss Weaknesses: **${session.boss.weakElements.map(getElementLabel).join(", ")}**`,
               `Field Aura: **${getElementLabel(fieldAura)}**`,
@@ -1038,7 +1093,6 @@ async function startElementalClashSession({
 
         const reaction = chooseReactionBonus(previousElement, player.element, fieldAura);
         const hardModeActive = session.difficulty === "hard";
-        const hardEligibleCharacter = isC6FiveStarCharacter(player.character);
         const elementMultiplier = bossElementMultiplier(player.element, session.boss);
         const power = calcCharacterPower(player);
         const variance = getCharacterDamageVariance(player.character.rarity);
@@ -1061,25 +1115,16 @@ async function startElementalClashSession({
           damage = 18;
         }
 
+        // HARD MODE SCALING
         if (hardModeActive) {
-          if (!hardEligibleCharacter) {
-            damage = 1;
-          } else {
-            let hardDamageMultiplier = 0.58;
-            if (session.hardPartyProfile === "weak_neutral") {
-              hardDamageMultiplier = 0.72;
-            } else if (session.hardPartyProfile === "neutral_only") {
-              hardDamageMultiplier = 0.58;
-            } else if (session.hardPartyProfile === "resistance") {
-              hardDamageMultiplier = 0.42;
-            }
-            damage = Math.max(18, Math.round(damage * hardDamageMultiplier));
-          }
+          const hardMultiplier = getHardModeDamageMultiplier(player, session.players, session.boss);
+          damage = Math.max(18, Math.round(damage * hardMultiplier));
         }
 
         session.bossHp -= damage;
         player.damageDone += damage;
 
+        // Counter damage calculation
         let counterDamage = Math.round((36 + round * 10) * (move.type === "burst" ? 1.12 : move.type === "guard" ? 0.4 : 1));
         counterDamage = Math.max(12, counterDamage - player.shield);
 
@@ -1087,6 +1132,7 @@ async function startElementalClashSession({
           counterDamage = Math.round(counterDamage * 1.2);
         }
 
+        // Shield generation
         if (move.type === "skill") {
           player.shield = Math.min(45, player.shield + 20);
         }
@@ -1100,31 +1146,17 @@ async function startElementalClashSession({
           player.shield = Math.min(60, player.shield + 28);
         }
 
+        // HARD MODE COUNTER SCALING
         if (hardModeActive) {
-          if (!hardEligibleCharacter) {
-            counterDamage = Math.max(counterDamage, player.resolve + Math.round(player.maxResolve * 0.85));
-          } else {
-            let hardCounterMultiplier = 1.55;
-            if (session.hardPartyProfile === "weak_neutral") {
-              hardCounterMultiplier = 1.28;
-            } else if (session.hardPartyProfile === "neutral_only") {
-              hardCounterMultiplier = 1.55;
-            } else if (session.hardPartyProfile === "resistance") {
-              hardCounterMultiplier = 1.92;
-            }
-            counterDamage = Math.round(counterDamage * hardCounterMultiplier);
-          }
+          const hardCounterMultiplier = getHardModeCounterMultiplier(player, session.players, session.boss);
+          counterDamage = Math.round(counterDamage * hardCounterMultiplier);
         }
 
         player.resolve -= counterDamage;
         if (player.resolve <= 0) {
           player.resolve = 0;
           player.active = false;
-          if (hardModeActive && !hardEligibleCharacter) {
-            roundLog.push(`${player.displayName}'s ${player.character.name} was instantly overwhelmed by Dottore (hard mode requires C6 5-star).`);
-          } else {
-            roundLog.push(`${player.displayName} landed ${damage} but was knocked out.`);
-          }
+          roundLog.push(`${player.displayName}'s ${player.character.name} was knocked out.`);
         } else {
           roundLog.push(formatRoundLine(player, move, damage, reaction.name, counterDamage, player.resolve));
         }
@@ -1144,6 +1176,7 @@ async function startElementalClashSession({
         break;
       }
 
+      // Restore burst charges and decay shields between rounds
       if (round < totalRounds) {
         for (const player of session.players) {
           if (player.active && player.burstCharge < 2 && round % 2 === 0) {
@@ -1172,7 +1205,7 @@ async function startElementalClashSession({
         .setTitle(`${emoji.shenheGroove} Elemental Clash - Round ${round}`)
         .setDescription(
           [
-            `Boss HP: **${Math.max(0, session.bossHp)} / ${session.boss.maxHp}**`,
+            `Boss HP: **${Math.max(0, Math.round(session.bossHp))} / ${session.boss.maxHp}**`,
             `Aura this round: **${getElementLabel(fieldAura)}**`,
             `Resistances: **${getBossResistances(session.boss).map(getElementLabel).join(", ")}**`,
             `Weaknesses: **${session.boss.weakElements.map(getElementLabel).join(", ")}**`,
@@ -1202,14 +1235,12 @@ async function startElementalClashSession({
 
     const finalFile = new AttachmentBuilder(finalBuffer, { name: "clash-final.webp" });
     const finalOutcome = won
-      ? `${emoji.shenheSmile} The team defeated ${session.boss.name}.
-${rewardLine}`
-      : `${emoji.laylaSad} The team could not break the boss before time ran out.
-${rewardLine}`;
+      ? `${emoji.shenheSmile} The team defeated ${session.boss.name}.\n${rewardLine}`
+      : `${emoji.laylaSad} The team could not break the boss before time ran out.\n${rewardLine}`;
 
-        const hardTag = session.difficulty === "hard" ? "\nDifficulty: **Hard (Dottore)**" : "\nDifficulty: **Normal**";
+    const hardTag = session.difficulty === "hard" ? "\nDifficulty: **Hard (Dottore)**" : "\nDifficulty: **Normal**";
 
-        const finalEmbed = buildFinalEmbed(session, emoji, `${finalOutcome}${hardTag}`);
+    const finalEmbed = buildFinalEmbed(session, emoji, `${finalOutcome}${hardTag}`);
 
     await battleMessage.edit({
       embeds: [finalEmbed],
@@ -1359,13 +1390,17 @@ ${rewardLine}`;
       try {
         await lobbyMessage.edit({ components: [] });
       } catch {
-        // Ignore edit errors when the message is removed.
+        // Ignore edit errors
       }
     }
   });
 
   return true;
 }
+
+// ============================================================================
+// FALLBACK COMMAND HANDLER
+// ============================================================================
 
 async function handleElementalClashFallbackCommand({
   message,
@@ -1392,6 +1427,7 @@ async function handleElementalClashFallbackCommand({
     const currentProfileUsers = await loadUsers();
     const currentProfile = await getProfile(currentProfileUsers, message.author.id);
     const existingIndex = session.players.findIndex((player) => player.userId === message.author.id);
+    const entryFee = getClashEntryFee(session.difficulty);
 
     if (action === "join") {
       if (existingIndex >= 0) {
