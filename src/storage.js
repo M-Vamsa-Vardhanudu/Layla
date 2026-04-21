@@ -22,7 +22,9 @@ const userProfileSchema = new mongoose.Schema(
     lastActivityAt: { type: Number, default: 0 },
     lastBannerVoteAt: { type: Number, default: 0 },
     lastWishAt: { type: Number, default: 0 },
-    lastClashAt: { type: Number, default: 0 }
+    lastClashAt: { type: Number, default: 0 },
+    lastHardClashAt: { type: Number, default: 0 },
+    preferredClashCharacter: { type: String, default: null }
   },
   { collection: "users", timestamps: true }
 );
@@ -107,7 +109,9 @@ function getDefaultProfile() {
     lastActivityAt: 0,
     lastBannerVoteAt: 0,
     lastWishAt: 0,
-    lastClashAt: 0
+    lastClashAt: 0,
+    lastHardClashAt: 0,
+    preferredClashCharacter: null
   };
 }
 
@@ -135,6 +139,8 @@ function hydrateProfile(profile) {
   profile.lastBannerVoteAt ??= defaults.lastBannerVoteAt;
   profile.lastWishAt ??= defaults.lastWishAt;
   profile.lastClashAt ??= defaults.lastClashAt;
+  profile.lastHardClashAt ??= defaults.lastHardClashAt;
+  profile.preferredClashCharacter ??= defaults.preferredClashCharacter;
 
   profile.inventory ??= defaults.inventory;
   profile.inventory.fiveStar = normalizeInventoryBucket(profile.inventory.fiveStar);

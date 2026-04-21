@@ -69,6 +69,8 @@ npm start
 - `!trivia`
 - `!answer <text>`
 - `!clash`
+- `!clash hard`
+- `!clashauto <character|clear>`
 - `!clashfix <join|leave|start|cancel|pick <character>|attack|skill|burst|guard>`
 - `!coinflip <heads|tails> <bet>`
 - `!trade @user`

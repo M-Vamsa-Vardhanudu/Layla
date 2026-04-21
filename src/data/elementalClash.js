@@ -17,8 +17,15 @@ const MAX_PLAYERS = 4;
 const LOBBY_TIMEOUT_MS = 45 * 1000;
 const ROUND_COUNT = 5;
 const TURN_ACTION_TIMEOUT_MS = 25 * 1000;
-const CLASH_ENTRY_FEE = 500;
-const BOSS_ART_FILE = path.resolve(__dirname, "..", "..", "311882f16264d6498dcf1ae277b9e031_3641850878197328239.webp");
+const NORMAL_CLASH_ENTRY_FEE = 500;
+const HARD_CLASH_ENTRY_FEE = 1000;
+const NORMAL_CLASH_WIN_REWARD = 1000;
+const HARD_CLASH_WIN_REWARD = 4000;
+const NORMAL_CLASH_LOSS_REWARD = 250;
+const HARD_CLASH_LOSS_REWARD = 800;
+const NORMAL_BOSS_ART_FILE = path.resolve(__dirname, "..", "..", "311882f16264d6498dcf1ae277b9e031_3641850878197328239.webp");
+const HARD_BOSS_ART_FILE = path.resolve(__dirname, "..", "..", "dottore.webp");
+const HARD_BOSS_ART_FALLBACK_URL = "https://imgs.search.brave.com/XjY3BE8SWEmcEcIVlc190h1GvgXq-RhsQseLhprF2Hw/rs:fit:860:0:0:0/g:ce/aHR0cHM6Ly9pLnJl/ZGQuaXQvMmdsdHJm/ZGJrejRnMS5wbmc";
 
 const activeClashByChannel = new Map();
 const TURN_ACTIONS = new Set(["attack", "skill", "burst", "guard"]);
@@ -42,6 +49,71 @@ const MOVE_LABELS = {
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+function bossArtConfigForDifficulty(difficulty = "normal") {
+  if (difficulty === "hard") {
+    return {
+      filePath: HARD_BOSS_ART_FILE,
+      fallbackUrl: HARD_BOSS_ART_FALLBACK_URL,
+      attachmentName: "boss-preview-hard.webp"
+    };
+  }
+
+  return {
+    filePath: NORMAL_BOSS_ART_FILE,
+    fallbackUrl: null,
+    attachmentName: "boss-preview.webp"
+  };
+}
+
+function isC6FiveStarCharacter(character) {
+  return character?.rarity === "fiveStar" && (character?.copies || 0) >= 7;
+}
+
+function getClashEntryFee(difficulty = "normal") {
+  return difficulty === "hard" ? HARD_CLASH_ENTRY_FEE : NORMAL_CLASH_ENTRY_FEE;
+}
+
+function getBossResistances(boss) {
+  if (Array.isArray(boss?.resistances) && boss.resistances.length > 0) {
+    return boss.resistances;
+  }
+
+  if (boss?.resistance) {
+    return [boss.resistance];
+  }
+
+  return [];
+}
+
+function getHardPartyProfile(players, boss) {
+  if (!Array.isArray(players) || players.length < 2) {
+    return null;
+  }
+
+  const matchups = players.map((player) => getElementMatchupType(player.element, boss));
+  const hasStrong = matchups.includes("strong");
+  const hasNeutral = matchups.includes("neutral");
+  const hasResisted = matchups.includes("resisted");
+
+  if (hasStrong && hasNeutral && !hasResisted) {
+    return "weak_neutral";
+  }
+
+  if (hasStrong && !hasResisted) {
+    return "weak_neutral";
+  }
+
+  if (matchups.every((matchup) => matchup === "neutral")) {
+    return "neutral_only";
+  }
+
+  if (hasResisted) {
+    return "resistance";
+  }
+
+  return "neutral_only";
 }
 
 function normalize(text) {
@@ -198,6 +270,7 @@ function chooseBoss() {
   return {
     name: pick(BOSS_NAMES),
     resistance,
+    resistances: [resistance],
     weakElements,
     aura,
     maxHp: 2600 + Math.floor(Math.random() * 450)
@@ -230,7 +303,8 @@ function formatPlayerLabel(player) {
 
 function bossElementMultiplier(element, boss) {
   const upper = String(element || "").toUpperCase();
-  if (upper === boss.resistance) return 0.6;
+  const resistances = getBossResistances(boss);
+  if (resistances.includes(upper)) return 0.6;
   if (boss.weakElements.includes(upper)) return 1.22;
   return 1.0;
 }
@@ -291,6 +365,7 @@ function buildBattleCardSvg({ boss, hpRemaining, round, totalRounds, fieldAura, 
   const hpPct = Math.max(0, Math.min(1, hpRemaining / boss.maxHp));
   const hpBarWidth = Math.round(420 * hpPct);
   const weakText = boss.weakElements.map(getElementLabel).join(", ");
+  const resistanceText = getBossResistances(boss).map(getElementLabel).join(", ");
   const playerLines = players.map((player) => `${player.displayName} - ${player.character.name} (${getElementLabel(player.element)})`);
   const logLines = combatLog.slice(-6);
 
@@ -339,8 +414,8 @@ function buildBattleCardSvg({ boss, hpRemaining, round, totalRounds, fieldAura, 
     <rect x="58" y="184" width="${hpBarWidth}" height="24" rx="12" fill="url(#hp)" />
     <text x="494" y="203" fill="#ffffff" font-size="19" font-weight="700">${Math.max(0, Math.round(hpRemaining))} / ${boss.maxHp}</text>
 
-    <text x="58" y="255" fill="#ffac73" font-size="22" font-weight="700">Resistance</text>
-    <text x="220" y="255" fill="#ffffff" font-size="22" font-weight="600">${escapeXml(getElementLabel(boss.resistance))}</text>
+    <text x="58" y="255" fill="#ffac73" font-size="22" font-weight="700">Resistances</text>
+    <text x="220" y="255" fill="#ffffff" font-size="22" font-weight="600">${escapeXml(resistanceText)}</text>
 
     <text x="58" y="295" fill="#8fd3ff" font-size="22" font-weight="700">Weaknesses</text>
     <text x="220" y="295" fill="#ffffff" font-size="22" font-weight="600">${escapeXml(weakText)}</text>
@@ -357,22 +432,41 @@ function buildBattleCardSvg({ boss, hpRemaining, round, totalRounds, fieldAura, 
 }
 
 async function renderBossCardBuffer(session) {
-  const artExists = fs.existsSync(BOSS_ART_FILE);
-  const bossArtBuffer = artExists
-    ? await sharp(BOSS_ART_FILE)
-        .resize(720, 800, { fit: "cover" })
-        .png()
-        .toBuffer()
-    : await sharp({
-        create: {
-          width: 720,
-          height: 800,
-          channels: 4,
-          background: { r: 18, g: 20, b: 30, alpha: 1 }
-        }
-      })
-        .png()
-        .toBuffer();
+  const artConfig = session?.bossArt || bossArtConfigForDifficulty(session?.difficulty || "normal");
+  let bossArtBuffer = null;
+
+  if (artConfig.filePath && fs.existsSync(artConfig.filePath)) {
+    bossArtBuffer = await sharp(artConfig.filePath)
+      .resize(720, 800, { fit: "cover" })
+      .png()
+      .toBuffer();
+  } else if (artConfig.fallbackUrl) {
+    try {
+      const response = await fetch(artConfig.fallbackUrl);
+      if (response.ok) {
+        const remoteBuffer = Buffer.from(await response.arrayBuffer());
+        bossArtBuffer = await sharp(remoteBuffer)
+          .resize(720, 800, { fit: "cover" })
+          .png()
+          .toBuffer();
+      }
+    } catch {
+      // Ignore remote art failures and use generated fallback.
+    }
+  }
+
+  if (!bossArtBuffer) {
+    bossArtBuffer = await sharp({
+      create: {
+        width: 720,
+        height: 800,
+        channels: 4,
+        background: { r: 18, g: 20, b: 30, alpha: 1 }
+      }
+    })
+      .png()
+      .toBuffer();
+  }
 
   const cardSvg = buildBattleCardSvg({
     boss: session.boss,
@@ -426,19 +520,23 @@ function createPlayerState(user, profile, characterElements, preferredCharacterN
 
 function buildLobbyEmbed(session, emoji) {
   const playerLines = session.players.map((player) => `• ${player.displayName} - ${player.character.name} (${getElementLabel(player.element)})`).join("\n");
+  const isHardMode = session.difficulty === "hard";
+  const entryFee = getClashEntryFee(session.difficulty);
 
   return new EmbedBuilder()
     .setTitle(`${emoji?.shenheGroove || "Elemental Clash"} Elemental Clash Lobby`)
     .setDescription(
       [
         "Join the raid, choose your character from your dropdown, then start.",
-        `Entry fee: **${CLASH_ENTRY_FEE}** primogems (charged when battle starts).`,
+        `Difficulty: **${isHardMode ? "Hard (Dottore)" : "Normal"}**`,
+        `Entry fee: **${entryFee}** primogems (charged when battle starts).`,
+        isHardMode ? "Hard rule: only **C6 5-star** characters can meaningfully damage this boss." : null,
         "",
         `Players: **${session.players.length}/${MAX_PLAYERS}**`,
         `Need at least **${MIN_PLAYERS}** players to start.`,
         "",
         playerLines || "No players yet"
-      ].join("\n")
+      ].filter(Boolean).join("\n")
     )
     .setColor(0x7c2d12);
 }
@@ -455,7 +553,7 @@ function buildFinalEmbed(session, emoji, outcomeText) {
         "",
         winners.length ? `Active players: ${winners.join(", ")}` : "No active players survived.",
         losers.length ? `Knocked out: ${losers.join(", ")}` : "",
-        `Boss resistance: ${getElementLabel(session.boss.resistance)}`,
+        `Boss resistances: ${getBossResistances(session.boss).map(getElementLabel).join(", ")}`,
         `Boss weaknesses: ${session.boss.weakElements.map(getElementLabel).join(", ")}`
       ]
         .filter(Boolean)
@@ -516,7 +614,7 @@ function getCharacterDamageVariance(rarity) {
 
 function getElementMatchupType(element, boss) {
   const upper = String(element || "").toUpperCase();
-  if (upper === boss.resistance) return "resisted";
+  if (getBossResistances(boss).includes(upper)) return "resisted";
   if (boss.weakElements.includes(upper)) return "strong";
   return "neutral";
 }
@@ -530,18 +628,19 @@ function getTurnLossChance(player, boss) {
 }
 
 async function collectEntryFees(session, saveUserProfile, loadUsers, getProfile) {
+  const entryFee = getClashEntryFee(session.difficulty);
   const users = await loadUsers();
   const remainingPlayers = [];
   const removedPlayers = [];
 
   for (const player of session.players) {
     const profile = await getProfile(users, player.userId);
-    if ((profile.primogems || 0) < CLASH_ENTRY_FEE) {
+    if ((profile.primogems || 0) < entryFee) {
       removedPlayers.push(player.displayName);
       continue;
     }
 
-    profile.primogems -= CLASH_ENTRY_FEE;
+    profile.primogems -= entryFee;
     await saveUserProfile(player.userId, profile);
 
     player.profile = profile;
@@ -580,10 +679,10 @@ function parseFallbackActionArgs(args) {
 }
 
 async function grantRewards(session, saveUserProfile, loadUsers, getProfile, emoji, won) {
-  const baseReward = won ? 3000 : 500;
-  const roundBonus = session.round * (won ? 300 : 50);
-  const difficultyBonus = won ? 500 : 0;
-  const reward = baseReward + roundBonus + difficultyBonus;
+  const hardMode = session.difficulty === "hard";
+  const reward = won
+    ? (hardMode ? HARD_CLASH_WIN_REWARD : NORMAL_CLASH_WIN_REWARD)
+    : (hardMode ? HARD_CLASH_LOSS_REWARD : NORMAL_CLASH_LOSS_REWARD);
   const users = await loadUsers();
 
   for (const player of session.players) {
@@ -593,8 +692,8 @@ async function grantRewards(session, saveUserProfile, loadUsers, getProfile, emo
   }
 
   const text = won
-    ? `${emoji?.primogem || ""} Team clear reward: **${reward}** primogems each (base ${baseReward} + round ${roundBonus} + bonus ${difficultyBonus}).`
-    : `${emoji?.primogem || ""} Consolation reward: **${reward}** primogems each (base ${baseReward} + round ${roundBonus}).`;
+    ? `${emoji?.primogem || ""} Team clear reward: **${reward}** primogems each.`
+    : `${emoji?.primogem || ""} Consolation reward: **${reward}** primogems each.`;
 
   return text;
 }
@@ -607,8 +706,11 @@ async function startElementalClashSession({
   saveUserProfile,
   prefix,
   emoji,
-  characterElements
+  characterElements,
+  difficulty = "normal"
 }) {
+  const entryFee = getClashEntryFee(difficulty);
+
   if (activeClashByChannel.has(message.channel.id)) {
     await message.reply(`${emoji.laylaHesitant} Another Elemental Clash is already running in this channel.`);
     return false;
@@ -619,14 +721,16 @@ async function startElementalClashSession({
     return false;
   }
 
-  if ((profile.primogems || 0) < CLASH_ENTRY_FEE) {
-    await message.reply(`${emoji.laylaHesitant} You need at least ${CLASH_ENTRY_FEE} primogems to open Elemental Clash.`);
+  if ((profile.primogems || 0) < entryFee) {
+    await message.reply(`${emoji.laylaHesitant} You need at least ${entryFee} primogems to open Elemental Clash.`);
     return false;
   }
 
   const session = {
     channelId: message.channel.id,
     initiatorId: message.author.id,
+    difficulty,
+    bossArt: bossArtConfigForDifficulty(difficulty),
     players: [],
     boss: null,
     bossHp: 0,
@@ -645,7 +749,7 @@ async function startElementalClashSession({
     customIdPrefix: `clash_${message.id}`
   };
 
-  const initiator = createPlayerState(message.author, profile, characterElements);
+  const initiator = createPlayerState(message.author, profile, characterElements, profile.preferredClashCharacter || null);
   if (!initiator) {
     await message.reply(`${emoji.laylaHesitant} You need at least one owned character to join Elemental Clash.`);
     return false;
@@ -705,11 +809,20 @@ async function startElementalClashSession({
     return rows;
   };
 
-  const lobbyMessage = await message.reply({
-    embeds: [buildLobbyEmbed(session, emoji)],
-    components: buildRows(false),
-    files: [new AttachmentBuilder(BOSS_ART_FILE, { name: "boss-preview.webp" })]
-  });
+  const lobbyEmbed = buildLobbyEmbed(session, emoji);
+  const lobbyPayload = {
+    embeds: [lobbyEmbed],
+    components: buildRows(false)
+  };
+
+  if (session.bossArt.filePath && fs.existsSync(session.bossArt.filePath)) {
+    lobbyEmbed.setImage(`attachment://${session.bossArt.attachmentName}`);
+    lobbyPayload.files = [new AttachmentBuilder(session.bossArt.filePath, { name: session.bossArt.attachmentName })];
+  } else if (session.bossArt.fallbackUrl) {
+    lobbyEmbed.setImage(session.bossArt.fallbackUrl);
+  }
+
+  const lobbyMessage = await message.reply(lobbyPayload);
 
   session.lobbyMessage = lobbyMessage;
 
@@ -753,7 +866,7 @@ async function startElementalClashSession({
       session.entryFeeCollected = true;
 
       if (feeResult.removedPlayers.length) {
-        await message.channel.send(`${emoji.laylaHesitant} Removed for insufficient primogems (${CLASH_ENTRY_FEE} needed): ${feeResult.removedPlayers.join(", ")}`);
+        await message.channel.send(`${emoji.laylaHesitant} Removed for insufficient primogems (${entryFee} needed): ${feeResult.removedPlayers.join(", ")}`);
       }
 
       if (session.players.length < MIN_PLAYERS) {
@@ -764,16 +877,54 @@ async function startElementalClashSession({
     }
 
     session.boss = chooseBoss();
+    if (session.difficulty === "hard") {
+      const resistances = shuffle(ELEMENTS).slice(0, 2);
+      const weakness = pick(ELEMENTS.filter((element) => !resistances.includes(element)));
+
+      session.boss.name = "Il Dottore, Harbinger of Ruin";
+      session.boss.resistances = resistances;
+      session.boss.resistance = resistances[0];
+      session.boss.weakElements = [weakness];
+      session.boss.maxHp = Math.round(session.boss.maxHp * 3.1);
+
+      session.hardPartyProfile = getHardPartyProfile(session.players, session.boss);
+
+      const hardEligible = session.players.filter((entry) => isC6FiveStarCharacter(entry.character)).length;
+      if (hardEligible === 0) {
+        await message.channel.send(`${emoji.laylaSad} Hard mode warning: no party member has a C6 5-star character. This run is expected to fail.`);
+      }
+
+      if (session.hardPartyProfile) {
+        const profileMessage = session.hardPartyProfile === "weak_neutral"
+          ? "Party profile: Weak + Neutral configured (~60-65% target win rate)."
+          : session.hardPartyProfile === "neutral_only"
+            ? "Party profile: Neutral configured (~50% target win rate)."
+            : "Party profile: Resistance configured (~30-35% target win rate).";
+        await message.channel.send(`${emoji.shenheTea} ${profileMessage}`);
+      }
+    }
     session.bossHp = scaleBossHpForParty(session.boss.maxHp, session.players, session.boss);
 
     try {
-      await lobbyMessage.edit({
-        embeds: [new EmbedBuilder()
-          .setTitle(`${emoji.shenheGroove} Elemental Clash`)
-          .setDescription(`The boss has appeared. Each player now chooses actions with buttons.`)
-          .setColor(0x8b1e1e)
-          .setImage("attachment://boss-preview.webp")],
+      const startEmbed = new EmbedBuilder()
+        .setTitle(`${emoji.shenheGroove} Elemental Clash`)
+        .setDescription(`The boss has appeared. Each player now chooses actions with buttons.`)
+        .setColor(0x8b1e1e);
+
+      const startPayload = {
+        embeds: [startEmbed],
         components: []
+      };
+
+      if (session.bossArt.filePath && fs.existsSync(session.bossArt.filePath)) {
+        startEmbed.setImage(`attachment://${session.bossArt.attachmentName}`);
+        startPayload.files = [new AttachmentBuilder(session.bossArt.filePath, { name: session.bossArt.attachmentName })];
+      } else if (session.bossArt.fallbackUrl) {
+        startEmbed.setImage(session.bossArt.fallbackUrl);
+      }
+
+      await lobbyMessage.edit({
+        ...startPayload
       });
     } catch {
       // Ignore edit errors when the message is removed.
@@ -809,7 +960,7 @@ async function startElementalClashSession({
               `Resolve: **${Math.round(player.resolve)} / ${player.maxResolve}**`,
               `Burst Charges: **${player.burstCharge}**`,
               `Boss HP: **${Math.max(0, session.bossHp)} / ${session.boss.maxHp}**`,
-              `Boss Resistance: **${getElementLabel(session.boss.resistance)}**`,
+              `Boss Resistances: **${getBossResistances(session.boss).map(getElementLabel).join(", ")}**`,
               `Boss Weaknesses: **${session.boss.weakElements.map(getElementLabel).join(", ")}**`,
               `Field Aura: **${getElementLabel(fieldAura)}**`,
               "",
@@ -900,6 +1051,8 @@ async function startElementalClashSession({
         }
 
         const reaction = chooseReactionBonus(previousElement, player.element, fieldAura);
+        const hardModeActive = session.difficulty === "hard";
+        const hardEligibleCharacter = isC6FiveStarCharacter(player.character);
         const elementMultiplier = bossElementMultiplier(player.element, session.boss);
         const power = calcCharacterPower(player);
         const variance = getCharacterDamageVariance(player.character.rarity);
@@ -920,6 +1073,22 @@ async function startElementalClashSession({
 
         if (damage < 18) {
           damage = 18;
+        }
+
+        if (hardModeActive) {
+          if (!hardEligibleCharacter) {
+            damage = 1;
+          } else {
+            let hardDamageMultiplier = 0.58;
+            if (session.hardPartyProfile === "weak_neutral") {
+              hardDamageMultiplier = 0.72;
+            } else if (session.hardPartyProfile === "neutral_only") {
+              hardDamageMultiplier = 0.58;
+            } else if (session.hardPartyProfile === "resistance") {
+              hardDamageMultiplier = 0.42;
+            }
+            damage = Math.max(18, Math.round(damage * hardDamageMultiplier));
+          }
         }
 
         session.bossHp -= damage;
@@ -945,11 +1114,31 @@ async function startElementalClashSession({
           player.shield = Math.min(60, player.shield + 28);
         }
 
+        if (hardModeActive) {
+          if (!hardEligibleCharacter) {
+            counterDamage = Math.max(counterDamage, player.resolve + Math.round(player.maxResolve * 0.85));
+          } else {
+            let hardCounterMultiplier = 1.55;
+            if (session.hardPartyProfile === "weak_neutral") {
+              hardCounterMultiplier = 1.28;
+            } else if (session.hardPartyProfile === "neutral_only") {
+              hardCounterMultiplier = 1.55;
+            } else if (session.hardPartyProfile === "resistance") {
+              hardCounterMultiplier = 1.92;
+            }
+            counterDamage = Math.round(counterDamage * hardCounterMultiplier);
+          }
+        }
+
         player.resolve -= counterDamage;
         if (player.resolve <= 0) {
           player.resolve = 0;
           player.active = false;
-          roundLog.push(`${player.displayName} landed ${damage} but was knocked out.`);
+          if (hardModeActive && !hardEligibleCharacter) {
+            roundLog.push(`${player.displayName}'s ${player.character.name} was instantly overwhelmed by Dottore (hard mode requires C6 5-star).`);
+          } else {
+            roundLog.push(`${player.displayName} landed ${damage} but was knocked out.`);
+          }
         } else {
           roundLog.push(formatRoundLine(player, move, damage, reaction.name, counterDamage, player.resolve));
         }
@@ -999,7 +1188,7 @@ async function startElementalClashSession({
           [
             `Boss HP: **${Math.max(0, session.bossHp)} / ${session.boss.maxHp}**`,
             `Aura this round: **${getElementLabel(fieldAura)}**`,
-            `Resistance: **${getElementLabel(session.boss.resistance)}**`,
+            `Resistances: **${getBossResistances(session.boss).map(getElementLabel).join(", ")}**`,
             `Weaknesses: **${session.boss.weakElements.map(getElementLabel).join(", ")}**`,
             "",
             session.combatLog.slice(-6).join("\n")
@@ -1032,7 +1221,9 @@ ${rewardLine}`
       : `${emoji.laylaSad} The team could not break the boss before time ran out.
 ${rewardLine}`;
 
-    const finalEmbed = buildFinalEmbed(session, emoji, finalOutcome);
+        const hardTag = session.difficulty === "hard" ? "\nDifficulty: **Hard (Dottore)**" : "\nDifficulty: **Normal**";
+
+        const finalEmbed = buildFinalEmbed(session, emoji, `${finalOutcome}${hardTag}`);
 
     await battleMessage.edit({
       embeds: [finalEmbed],
@@ -1109,12 +1300,12 @@ ${rewardLine}`;
         return;
       }
 
-      if ((currentProfile.primogems || 0) < CLASH_ENTRY_FEE) {
-        await interaction.reply({ content: `${emoji.laylaHesitant} You need at least ${CLASH_ENTRY_FEE} primogems to enter Elemental Clash.`, ephemeral: true });
+      if ((currentProfile.primogems || 0) < entryFee) {
+        await interaction.reply({ content: `${emoji.laylaHesitant} You need at least ${entryFee} primogems to enter Elemental Clash.`, ephemeral: true });
         return;
       }
 
-      const player = createPlayerState(interaction.user, currentProfile, characterElements);
+      const player = createPlayerState(interaction.user, currentProfile, characterElements, currentProfile.preferredClashCharacter || null);
       if (!player) {
         await interaction.reply({ content: `${emoji.laylaHesitant} You need at least one owned character to join.`, ephemeral: true });
         return;
@@ -1232,12 +1423,12 @@ async function handleElementalClashFallbackCommand({
         return;
       }
 
-      if ((currentProfile.primogems || 0) < CLASH_ENTRY_FEE) {
-        await message.reply(`${emoji.laylaHesitant} You need at least ${CLASH_ENTRY_FEE} primogems to enter Elemental Clash.`);
+      if ((currentProfile.primogems || 0) < entryFee) {
+        await message.reply(`${emoji.laylaHesitant} You need at least ${entryFee} primogems to enter Elemental Clash.`);
         return;
       }
 
-      const player = createPlayerState(message.author, currentProfile, characterElements);
+      const player = createPlayerState(message.author, currentProfile, characterElements, currentProfile.preferredClashCharacter || null);
       if (!player) {
         await message.reply(`${emoji.laylaHesitant} You need at least one owned character to join.`);
         return;

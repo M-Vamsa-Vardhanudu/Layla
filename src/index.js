@@ -26,7 +26,8 @@ const PREFIX = process.env.PREFIX || "!";
 const WISH_COST = 160;
 const WISH_EMBED_COLOR = 0xf39c12;
 const WISH_COOLDOWN_MS = 10 * 1000;
-const CLASH_COOLDOWN_MS = 3 * 60 * 1000;
+const CLASH_NORMAL_COOLDOWN_MS = 3 * 60 * 1000;
+const CLASH_HARD_COOLDOWN_MS = 5 * 60 * 1000;
 const TRIVIA_COOLDOWN_MS = 3 * 1000;
 const ACTIVITY_COOLDOWN_MS = 2 * 60 * 1000;
 const ACTIVITY_REWARD_PRIMOS = 8;
@@ -140,6 +141,18 @@ function characterPreviewDescription(name, profile) {
   const elementText = elementKey ? `${elementEmoji} ${titleCase(elementKey)}` : "Unknown Element";
 
   return [`Rarity: **${rarity}**`, `Copies: **x${copies}**`, `Element: ${elementText}`].join("\n");
+}
+
+function findOwnedCharacterName(profile, requestedName) {
+  const target = normalize(String(requestedName || ""));
+  if (!target) return null;
+
+  const owned = [...new Set([
+    ...Object.keys(profile.inventory.fiveStar || {}),
+    ...Object.keys(profile.inventory.fourStar || {})
+  ])];
+
+  return owned.find((name) => normalize(name) === target) || null;
 }
 
 const CHARACTER_SLUG_OVERRIDES = {
@@ -1032,9 +1045,10 @@ client.on("messageCreate", async (message) => {
           `${EMOJI.laylaConfident} **Mini-Games & Events**`,
           `${AESTHETIC_EMOJIS[0]} \`${PREFIX}trivia\` — Get a trivia question for primogem rewards`,
           `${AESTHETIC_EMOJIS[1]} \`${PREFIX}answer <text>\` — Answer active trivia`,
-          `${AESTHETIC_EMOJIS[2]} \`${PREFIX}clash\` — Elemental Clash raid (2-4 players, 5 rounds, win 5000+ primos)`,
+          `${AESTHETIC_EMOJIS[2]} \`${PREFIX}clash [hard]\` — Elemental Clash raid (add hard for Dottore mode)`,
+          `${AESTHETIC_EMOJIS[3]} \`${PREFIX}clashauto <character|clear>\` — Set your default auto-picked clash character`,
           `${AESTHETIC_EMOJIS[3]} \`${PREFIX}clashfix <action> [args]\` — Fallback when clash buttons fail`,
-          `${AESTHETIC_EMOJIS[4]} Clash cooldown: **${Math.floor(CLASH_COOLDOWN_MS / 60000)}m** per user`,
+          `${AESTHETIC_EMOJIS[4]} Clash cooldown: **${Math.floor(CLASH_NORMAL_COOLDOWN_MS / 60000)}m normal / ${Math.floor(CLASH_HARD_COOLDOWN_MS / 60000)}m hard**`,
           "",
           "━━━━━━━━━━━━━━━━━━━",
           `${EMOJI.shenheTea} **Gambling & Trading**`,
@@ -1321,14 +1335,48 @@ client.on("messageCreate", async (message) => {
     return;
   }
 
+  if (cmd === "clashauto") {
+    const rawInput = args.join(" ").trim();
+
+    if (!rawInput) {
+      const current = profile.preferredClashCharacter || "Not set";
+      await message.reply(`${EMOJI.shenheTea} Current clash auto-select: **${current}**`);
+      return;
+    }
+
+    const lowered = rawInput.toLowerCase();
+    if (["clear", "reset", "none", "off"].includes(lowered)) {
+      profile.preferredClashCharacter = null;
+      await saveUserProfile(message.author.id, profile);
+      await message.reply(`${EMOJI.shenheSmile} Clash auto-select cleared. The bot will use your top owned character again.`);
+      return;
+    }
+
+    const ownedName = findOwnedCharacterName(profile, rawInput);
+    if (!ownedName) {
+      await message.reply(`${EMOJI.laylaHesitant} You do not own **${rawInput}**. Use ${PREFIX}characters to check your roster.`);
+      return;
+    }
+
+    profile.preferredClashCharacter = ownedName;
+    await saveUserProfile(message.author.id, profile);
+    await message.reply(`${EMOJI.shenheSmile} Clash auto-select set to **${ownedName}**.`);
+    return;
+  }
+
   if (cmd === "clash") {
+    const modeArg = String(args[0] || "normal").toLowerCase();
+    const difficulty = ["hard", "nightmare", "difficult"].includes(modeArg) ? "hard" : "normal";
+    const cooldownMs = difficulty === "hard" ? CLASH_HARD_COOLDOWN_MS : CLASH_NORMAL_COOLDOWN_MS;
+    const cooldownStamp = difficulty === "hard" ? (profile.lastHardClashAt || 0) : (profile.lastClashAt || 0);
+
     const now = Date.now();
-    if (now - (profile.lastClashAt || 0) < CLASH_COOLDOWN_MS) {
-      const remainingMs = CLASH_COOLDOWN_MS - (now - (profile.lastClashAt || 0));
+    if (now - cooldownStamp < cooldownMs) {
+      const remainingMs = cooldownMs - (now - cooldownStamp);
       const remainingSeconds = Math.ceil(remainingMs / 1000);
       const minutes = Math.floor(remainingSeconds / 60);
       const seconds = remainingSeconds % 60;
-      await message.reply(`${EMOJI.laylaHesitant} Clash cooldown active. Try again in ${minutes}m ${seconds}s.`);
+      await message.reply(`${EMOJI.laylaHesitant} ${difficulty === "hard" ? "Hard" : "Normal"} clash cooldown active. Try again in ${minutes}m ${seconds}s.`);
       return;
     }
 
@@ -1340,11 +1388,16 @@ client.on("messageCreate", async (message) => {
       saveUserProfile,
       prefix: PREFIX,
       emoji: EMOJI,
-      characterElements: CHARACTER_ELEMENTS
+      characterElements: CHARACTER_ELEMENTS,
+      difficulty
     });
 
     if (started) {
-      profile.lastClashAt = now;
+      if (difficulty === "hard") {
+        profile.lastHardClashAt = now;
+      } else {
+        profile.lastClashAt = now;
+      }
       await saveUserProfile(message.author.id, profile);
     }
 
