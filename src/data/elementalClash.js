@@ -21,6 +21,7 @@ const CLASH_ENTRY_FEE = 500;
 const BOSS_ART_FILE = path.resolve(__dirname, "..", "..", "311882f16264d6498dcf1ae277b9e031_3641850878197328239.webp");
 
 const activeClashByChannel = new Map();
+const TURN_ACTIONS = new Set(["attack", "skill", "burst", "guard"]);
 
 const BOSS_NAMES = [
   "Abyssal Warden",
@@ -572,6 +573,12 @@ function formatRoundLine(player, move, damage, reactionName, counterDamage, reso
   return `${player.displayName}: ${MOVE_LABELS[move.type]}${reactionText} for ${damage}${counterText} | resolve ${Math.max(0, Math.round(resolveAfter))}`;
 }
 
+function parseFallbackActionArgs(args) {
+  const action = String(args?.[0] || "").toLowerCase();
+  const actionArgs = Array.isArray(args) ? args.slice(1) : [];
+  return { action, actionArgs };
+}
+
 async function grantRewards(session, saveUserProfile, loadUsers, getProfile, emoji, won) {
   const baseReward = won ? 3000 : 500;
   const roundBonus = session.round * (won ? 300 : 50);
@@ -604,17 +611,17 @@ async function startElementalClashSession({
 }) {
   if (activeClashByChannel.has(message.channel.id)) {
     await message.reply(`${emoji.laylaHesitant} Another Elemental Clash is already running in this channel.`);
-    return;
+    return false;
   }
 
   if (!isPlayerReady(profile)) {
     await message.reply(`${emoji.laylaHesitant} You need at least one character before starting Elemental Clash.`);
-    return;
+    return false;
   }
 
   if ((profile.primogems || 0) < CLASH_ENTRY_FEE) {
     await message.reply(`${emoji.laylaHesitant} You need at least ${CLASH_ENTRY_FEE} primogems to open Elemental Clash.`);
-    return;
+    return false;
   }
 
   const session = {
@@ -628,6 +635,10 @@ async function startElementalClashSession({
     active: true,
     lobbyMessage: null,
     collector: null,
+    refreshLobby: null,
+    cleanup: null,
+    startBattle: null,
+    pendingTurn: null,
     battleStarted: false,
     entryFeeCollected: false,
     timeoutId: null,
@@ -637,7 +648,7 @@ async function startElementalClashSession({
   const initiator = createPlayerState(message.author, profile, characterElements);
   if (!initiator) {
     await message.reply(`${emoji.laylaHesitant} You need at least one owned character to join Elemental Clash.`);
-    return;
+    return false;
   }
 
   session.players.push(initiator);
@@ -712,6 +723,7 @@ async function startElementalClashSession({
       // Ignore edit errors when the message is removed.
     }
   };
+  session.refreshLobby = refreshLobby;
 
   const cleanup = async () => {
     activeClashByChannel.delete(message.channel.id);
@@ -731,6 +743,7 @@ async function startElementalClashSession({
       // Ignore edit errors when the message is removed.
     }
   };
+  session.cleanup = cleanup;
 
   const startBattle = async () => {
     session.battleStarted = true;
@@ -814,6 +827,13 @@ async function startElementalClashSession({
         });
 
         await new Promise((resolveTurn) => {
+          session.pendingTurn = {
+            round,
+            playerId: player.userId,
+            selectedMoveType,
+            collector: turnCollector
+          };
+
           turnCollector.on("collect", async (interaction) => {
             if (!interaction.customId.startsWith(turnPrefix)) {
               return;
@@ -845,11 +865,18 @@ async function startElementalClashSession({
             }
 
             selectedMoveType = moveType;
+            if (session.pendingTurn && session.pendingTurn.playerId === player.userId && session.pendingTurn.round === round) {
+              session.pendingTurn.selectedMoveType = moveType;
+            }
             await interaction.deferUpdate();
             turnCollector.stop("selected");
           });
 
           turnCollector.on("end", () => {
+            if (session.pendingTurn && session.pendingTurn.playerId === player.userId && session.pendingTurn.round === round) {
+              selectedMoveType = session.pendingTurn.selectedMoveType || selectedMoveType;
+              session.pendingTurn = null;
+            }
             resolveTurn();
           });
         });
@@ -1015,6 +1042,7 @@ ${rewardLine}`;
 
     await cleanup();
   };
+  session.startBattle = startBattle;
 
   session.timeoutId = setTimeout(async () => {
     if (!session.battleStarted && session.players.length >= MIN_PLAYERS) {
@@ -1158,8 +1186,177 @@ ${rewardLine}`;
       }
     }
   });
+
+  return true;
+}
+
+async function handleElementalClashFallbackCommand({
+  message,
+  args,
+  loadUsers,
+  getProfile,
+  saveUserProfile,
+  emoji,
+  characterElements
+}) {
+  const session = activeClashByChannel.get(message.channel.id);
+  if (!session) {
+    await message.reply(`${emoji.laylaHesitant} No active Elemental Clash in this channel right now.`);
+    return;
+  }
+
+  const { action, actionArgs } = parseFallbackActionArgs(args);
+  if (!action) {
+    await message.reply(`${emoji.laylaHesitant} Usage: clashfix <join|leave|start|cancel|pick <character>|attack|skill|burst|guard>.`);
+    return;
+  }
+
+  if (!session.battleStarted) {
+    const currentProfileUsers = await loadUsers();
+    const currentProfile = await getProfile(currentProfileUsers, message.author.id);
+    const existingIndex = session.players.findIndex((player) => player.userId === message.author.id);
+
+    if (action === "join") {
+      if (existingIndex >= 0) {
+        await message.reply(`${emoji.laylaHesitant} You are already in the raid.`);
+        return;
+      }
+
+      if (session.players.length >= MAX_PLAYERS) {
+        await message.reply(`${emoji.laylaHesitant} The party is already full.`);
+        return;
+      }
+
+      if (!isPlayerReady(currentProfile)) {
+        await message.reply(`${emoji.laylaHesitant} You need at least one character to join.`);
+        return;
+      }
+
+      if ((currentProfile.primogems || 0) < CLASH_ENTRY_FEE) {
+        await message.reply(`${emoji.laylaHesitant} You need at least ${CLASH_ENTRY_FEE} primogems to enter Elemental Clash.`);
+        return;
+      }
+
+      const player = createPlayerState(message.author, currentProfile, characterElements);
+      if (!player) {
+        await message.reply(`${emoji.laylaHesitant} You need at least one owned character to join.`);
+        return;
+      }
+
+      session.players.push(player);
+      await session.refreshLobby?.();
+      await message.reply(`${emoji.shenheSmile} Joined the Elemental Clash lobby via command fallback.`);
+      return;
+    }
+
+    if (action === "leave") {
+      if (existingIndex < 0) {
+        await message.reply(`${emoji.laylaHesitant} You are not in the raid.`);
+        return;
+      }
+
+      if (message.author.id === session.initiatorId) {
+        await message.reply(`${emoji.laylaHesitant} The host cannot leave. Use cancel instead.`);
+        return;
+      }
+
+      session.players.splice(existingIndex, 1);
+      await session.refreshLobby?.();
+      await message.reply(`${emoji.shenheSmile} You left the Elemental Clash lobby.`);
+      return;
+    }
+
+    if (action === "pick") {
+      if (existingIndex < 0) {
+        await message.reply(`${emoji.laylaHesitant} Join the raid first, then pick a character.`);
+        return;
+      }
+
+      const selectedName = actionArgs.join(" ").trim();
+      if (!selectedName) {
+        await message.reply(`${emoji.laylaHesitant} Usage: clashfix pick <character name>.`);
+        return;
+      }
+
+      const updatedState = createPlayerState(message.author, currentProfile, characterElements, selectedName);
+      if (!updatedState) {
+        await message.reply(`${emoji.laylaHesitant} Could not use that character for this battle.`);
+        return;
+      }
+
+      session.players[existingIndex] = updatedState;
+      await session.refreshLobby?.();
+      await message.reply(`${emoji.shenheSmile} Character set to **${updatedState.character.name}** via fallback command.`);
+      return;
+    }
+
+    if (action === "cancel") {
+      if (message.author.id !== session.initiatorId) {
+        await message.reply(`${emoji.laylaHesitant} Only the host can cancel this lobby.`);
+        return;
+      }
+
+      await message.channel.send(`${emoji.laylaSad} Elemental Clash cancelled by the host (fallback command).`);
+      await session.cleanup?.();
+      return;
+    }
+
+    if (action === "start") {
+      if (message.author.id !== session.initiatorId) {
+        await message.reply(`${emoji.laylaHesitant} Only the host can start the raid.`);
+        return;
+      }
+
+      if (session.players.length < MIN_PLAYERS) {
+        await message.reply(`${emoji.laylaHesitant} You need at least ${MIN_PLAYERS} players to start.`);
+        return;
+      }
+
+      if (session.timeoutId) {
+        clearTimeout(session.timeoutId);
+      }
+
+      await message.reply(`${emoji.shenheTea} Starting Elemental Clash via fallback command...`);
+      await session.startBattle?.();
+      return;
+    }
+
+    await message.reply(`${emoji.laylaHesitant} Lobby fallback supports: join, leave, pick, start, cancel.`);
+    return;
+  }
+
+  if (!TURN_ACTIONS.has(action)) {
+    await message.reply(`${emoji.laylaHesitant} Battle fallback supports: attack, skill, burst, guard.`);
+    return;
+  }
+
+  if (!session.pendingTurn) {
+    await message.reply(`${emoji.laylaHesitant} There is no active player turn right now.`);
+    return;
+  }
+
+  if (session.pendingTurn.playerId !== message.author.id) {
+    await message.reply(`${emoji.laylaHesitant} It is currently another player's turn.`);
+    return;
+  }
+
+  const player = session.players.find((entry) => entry.userId === message.author.id);
+  if (!player) {
+    await message.reply(`${emoji.laylaHesitant} You are not part of this raid.`);
+    return;
+  }
+
+  if (action === "burst" && player.burstCharge <= 0) {
+    await message.reply(`${emoji.laylaHesitant} You have no burst charges right now.`);
+    return;
+  }
+
+  session.pendingTurn.selectedMoveType = action;
+  session.pendingTurn.collector?.stop("fallback");
+  await message.reply(`${emoji.shenheSmile} Registered **${MOVE_LABELS[action]}** for your turn via fallback command.`);
 }
 
 module.exports = {
-  startElementalClashSession
+  startElementalClashSession,
+  handleElementalClashFallbackCommand
 };

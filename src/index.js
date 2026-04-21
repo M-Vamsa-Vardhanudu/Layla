@@ -18,13 +18,15 @@ const {
 } = require("discord.js");
 const { getTodayBanner, CHARACTERS, CHARACTER_ELEMENTS, getVotedBanner } = require("./data/banners");
 const { getRandomTrivia } = require("./data/trivia");
-const { startElementalClashSession } = require("./data/elementalClash");
+const { startElementalClashSession, handleElementalClashFallbackCommand } = require("./data/elementalClash");
 const { loadUsers, saveUsers, getProfile, loadUserProfile, saveUserProfile, connectDatabase, saveBannerVote, getBannerVotes, resetBannerVotes, saveBannerHistory, getBannerHistory } = require("./storage");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const PREFIX = process.env.PREFIX || "!";
 const WISH_COST = 160;
 const WISH_EMBED_COLOR = 0xf39c12;
+const WISH_COOLDOWN_MS = 10 * 1000;
+const CLASH_COOLDOWN_MS = 3 * 60 * 1000;
 const TRIVIA_COOLDOWN_MS = 3 * 1000;
 const ACTIVITY_COOLDOWN_MS = 2 * 60 * 1000;
 const ACTIVITY_REWARD_PRIMOS = 8;
@@ -1022,6 +1024,7 @@ client.on("messageCreate", async (message) => {
           `${AESTHETIC_EMOJIS[0]} \`${PREFIX}banner\` — Show active banner & featured characters`,
           `${AESTHETIC_EMOJIS[1]} \`${PREFIX}vote\` — Vote for next banner's featured 5★ (UI + 24h cooldown)`,
           `${AESTHETIC_EMOJIS[2]} \`${PREFIX}wish [1|10]\` — Spend primogems to wish`,
+          `${AESTHETIC_EMOJIS[3]} Wish cooldown: **${Math.floor(WISH_COOLDOWN_MS / 1000)}s** per user`,
           `${AESTHETIC_EMOJIS[3]} \`${PREFIX}characters\` — View your character roster (sorting & pagination)`,
           `${AESTHETIC_EMOJIS[4]} \`${PREFIX}profile\` — Check primogems, pity, level & inventory`,
           "",
@@ -1030,6 +1033,8 @@ client.on("messageCreate", async (message) => {
           `${AESTHETIC_EMOJIS[0]} \`${PREFIX}trivia\` — Get a trivia question for primogem rewards`,
           `${AESTHETIC_EMOJIS[1]} \`${PREFIX}answer <text>\` — Answer active trivia`,
           `${AESTHETIC_EMOJIS[2]} \`${PREFIX}clash\` — Elemental Clash raid (2-4 players, 5 rounds, win 5000+ primos)`,
+          `${AESTHETIC_EMOJIS[3]} \`${PREFIX}clashfix <action> [args]\` — Fallback when clash buttons fail`,
+          `${AESTHETIC_EMOJIS[4]} Clash cooldown: **${Math.floor(CLASH_COOLDOWN_MS / 60000)}m** per user`,
           "",
           "━━━━━━━━━━━━━━━━━━━",
           `${EMOJI.shenheTea} **Gambling & Trading**`,
@@ -1317,13 +1322,42 @@ client.on("messageCreate", async (message) => {
   }
 
   if (cmd === "clash") {
-    await startElementalClashSession({
+    const now = Date.now();
+    if (now - (profile.lastClashAt || 0) < CLASH_COOLDOWN_MS) {
+      const remainingMs = CLASH_COOLDOWN_MS - (now - (profile.lastClashAt || 0));
+      const remainingSeconds = Math.ceil(remainingMs / 1000);
+      const minutes = Math.floor(remainingSeconds / 60);
+      const seconds = remainingSeconds % 60;
+      await message.reply(`${EMOJI.laylaHesitant} Clash cooldown active. Try again in ${minutes}m ${seconds}s.`);
+      return;
+    }
+
+    const started = await startElementalClashSession({
       message,
       profile,
       loadUsers,
       getProfile,
       saveUserProfile,
       prefix: PREFIX,
+      emoji: EMOJI,
+      characterElements: CHARACTER_ELEMENTS
+    });
+
+    if (started) {
+      profile.lastClashAt = now;
+      await saveUserProfile(message.author.id, profile);
+    }
+
+    return;
+  }
+
+  if (cmd === "clashfix") {
+    await handleElementalClashFallbackCommand({
+      message,
+      args,
+      loadUsers,
+      getProfile,
+      saveUserProfile,
       emoji: EMOJI,
       characterElements: CHARACTER_ELEMENTS
     });
@@ -2373,6 +2407,13 @@ client.on("messageCreate", async (message) => {
   }
 
   if (cmd === "wish") {
+    const now = Date.now();
+    if (now - (profile.lastWishAt || 0) < WISH_COOLDOWN_MS) {
+      const remaining = Math.ceil((WISH_COOLDOWN_MS - (now - (profile.lastWishAt || 0))) / 1000);
+      await message.reply(`${EMOJI.laylaHesitant} Wish cooldown active. Try again in ${remaining}s.`);
+      return;
+    }
+
     const amountArg = Number.parseInt(args[0] || "1", 10);
     const amount = amountArg === 10 ? 10 : 1;
     const cost = amount * WISH_COST;
@@ -2395,6 +2436,7 @@ client.on("messageCreate", async (message) => {
 
     const levelsGained = gainExp(profile, amount * 12);
     const levelUpPrimos = awardLevelUpPrimos(profile, levelsGained);
+  profile.lastWishAt = now;
 
     await saveUserProfile(message.author.id, profile);
 

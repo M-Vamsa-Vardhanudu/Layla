@@ -11,6 +11,7 @@ A Discord bot with:
 
 - 3-day rotating banner (`!banner`)
 - Wishing (`!wish 1` or `!wish 10`)
+  - Cooldown: 10 seconds per user
   - 5-star base chance: 0.6%
   - 4-star base chance: 5.7%
   - 5-star pity: guaranteed by 90 pulls
@@ -28,6 +29,8 @@ A Discord bot with:
 - Coinflip betting with primogem rewards or losses (`!coinflip`)
 - Player-to-player trading with two-step approval (`!trade`)
 - Elemental Clash raid minigame with boss splash art and elemental reactions (`!clash`)
+  - Cooldown: 3 minutes per user
+  - Fallback command when buttons fail: `!clashfix`
 
 ## Setup
 
@@ -66,6 +69,7 @@ npm start
 - `!trivia`
 - `!answer <text>`
 - `!clash`
+- `!clashfix <join|leave|start|cancel|pick <character>|attack|skill|burst|guard>`
 - `!coinflip <heads|tails> <bet>`
 - `!trade @user`
 - `!trade @user give <amount> <type> [item name] receive <amount> <type> [item name]`
